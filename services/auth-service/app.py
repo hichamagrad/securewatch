@@ -39,10 +39,9 @@ lock = threading.Lock()
 
 # Utilisateurs valides (simulation)
 VALID_USERS = {
-    'admin': 'password123',
-    'user1': 'secret456',
-    'operator': 'ops789',
-    'hicham': 'pfa2026'
+    'admin': os.environ.get('DEMO_ADMIN_PASSWORD', 'admin'),
+    'user1': os.environ.get('DEMO_USER1_PASSWORD', 'user1'),
+    'operator': os.environ.get('DEMO_OPERATOR_PASSWORD', 'operator'),
 }
 
 
