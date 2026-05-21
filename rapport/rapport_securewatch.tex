@@ -1,0 +1,1107 @@
+% ============================================================
+%  Rapport PFA 2025-2026 — SecureWatch
+%  Compilateur : pdflatex (deux passages)
+%  Encodage   : UTF-8
+% ============================================================
+\documentclass[12pt, a4paper]{report}
+
+% ── Encodage & langue ────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+
+% ── Mise en page ─────────────────────────────────────────────
+\usepackage[
+  top=2.5cm, bottom=2.5cm,
+  left=2.8cm, right=2.5cm,
+  headheight=15pt
+]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ── Graphiques & couleurs ─────────────────────────────────────
+\usepackage{graphicx}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\graphicspath{{screenshots/}}
+
+% Couleurs charte EMSI
+\definecolor{emsigreen}{RGB}{0, 130, 60}
+\definecolor{emsiref}{RGB}{180, 0, 0}
+
+% ── Typographie ───────────────────────────────────────────────
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{parskip}
+
+% ── En-têtes et pieds de page ────────────────────────────────
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{SecureWatch — PFA 2025-2026}}
+\fancyhead[R]{\small\textit{\leftmark}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Liens hypertexte ─────────────────────────────────────────
+\usepackage[
+  colorlinks=true,
+  linkcolor=NavyBlue,
+  urlcolor=NavyBlue,
+  citecolor=NavyBlue
+]{hyperref}
+
+% ── Code source ──────────────────────────────────────────────
+\usepackage{listings}
+\usepackage{lstautogobble}
+
+\definecolor{codebg}{RGB}{248,249,250}
+\definecolor{codeframe}{RGB}{222,226,230}
+\definecolor{keyword}{RGB}{0,119,170}
+\definecolor{string}{RGB}{102,153,0}
+\definecolor{comment}{RGB}{153,153,153}
+
+\lstdefinestyle{securewatch}{
+  backgroundcolor=\color{codebg},
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{codeframe},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{keyword}\bfseries,
+  stringstyle=\color{string},
+  commentstyle=\color{comment}\itshape,
+  breaklines=true,
+  breakatwhitespace=true,
+  showstringspaces=false,
+  tabsize=2,
+  autogobble=true,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  xleftmargin=12pt,
+  captionpos=b
+}
+
+\lstdefinestyle{bash}{
+  style=securewatch,
+  language=bash,
+  morekeywords={docker-compose,python,curl,pip}
+}
+
+\lstdefinestyle{yaml}{
+  style=securewatch,
+  language=,
+  morestring=[b]{"},
+  morestring=[b]{'},
+  morecomment=[l]{\#},
+  morekeywords={true,false,null}
+}
+
+\lstset{style=securewatch}
+
+% ── Tableaux ─────────────────────────────────────────────────
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{array}
+
+% ── Boîtes d'information ─────────────────────────────────────
+\usepackage{tcolorbox}
+\tcbuselibrary{skins, breakable}
+
+\newtcolorbox{infobox}[1][]{
+  enhanced, breakable,
+  colback=blue!5, colframe=NavyBlue!60,
+  fonttitle=\bfseries, title=#1,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+
+\newtcolorbox{alertbox}[1][]{
+  enhanced, breakable,
+  colback=red!5, colframe=red!60,
+  fonttitle=\bfseries, title=#1,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+
+\newtcolorbox{successbox}[1][]{
+  enhanced, breakable,
+  colback=green!5, colframe=green!50!black!60,
+  fonttitle=\bfseries, title=#1,
+  left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+
+% ── Divers ───────────────────────────────────────────────────
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{pifont}
+
+\newcommand{\cmark}{\ding{51}}
+\newcommand{\xmark}{\ding{55}}
+
+% ── Placeholder automatique pour les screenshots ─────────────
+% Usage : \screenshot[largeur]{fichier}{légende}{label}
+% Si screenshots/fichier.png existe  → affiche l'image
+% Sinon                              → boîte grise avec le nom du fichier
+\newcommand{\screenshot}[4][0.95\textwidth]{%
+  \begin{figure}[H]
+    \centering
+    \IfFileExists{screenshots/#2.png}{%
+      \includegraphics[width=#1]{screenshots/#2.png}%
+    }{%
+      \fcolorbox{gray!60}{gray!10}{%
+        \parbox[c][5cm][c]{\dimexpr#1 - 2\fboxsep - 2\fboxrule\relax}{%
+          \centering
+          {\color{gray!50}\fontsize{36}{36}\selectfont\ding{94}}\\[0.4cm]
+          {\ttfamily\small\color{gray!80} screenshots/#2.png}\\[0.3cm]
+          {\small\itshape\color{gray} Screenshot à insérer}%
+        }%
+      }%
+    }%
+    \caption{#3}
+    \label{fig:#4}
+  \end{figure}%
+}
+
+% ── Style des titres ─────────────────────────────────────────
+\titleformat{\chapter}[display]
+  {\normalfont\Large\bfseries\color{NavyBlue}}
+  {\chaptertitlename\ \thechapter}{10pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-20pt}{20pt}
+
+\titleformat{\section}
+  {\normalfont\large\bfseries\color{NavyBlue!80}}
+  {\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\normalsize\bfseries}
+  {\thesubsection}{1em}{}
+
+% ============================================================
+%  DOCUMENT
+% ============================================================
+\begin{document}
+
+% ── Page de garde ────────────────────────────────────────────
+\begin{titlepage}
+  \thispagestyle{empty}
+
+  % ── Éléments décoratifs (barre verte + carré rouge) ─────────
+  \begin{tikzpicture}[remember picture, overlay]
+    % Barre verte verticale sur toute la hauteur de la page
+    \fill[emsigreen]
+      (current page.north west)
+      rectangle
+      ([xshift=1.4cm] current page.south west);
+    % Petit carré rouge en bas à gauche
+    \fill[emsiref]
+      (current page.south west)
+      rectangle
+      ([xshift=1.4cm, yshift=1.4cm] current page.south west);
+  \end{tikzpicture}
+
+  % ── Logos (laisser la place, ajouter vos fichiers PNG) ───────
+  \noindent
+  \begin{minipage}[c]{0.48\textwidth}
+    \raggedright
+    % Décommenter quand logo_emsi.png est disponible :
+    % \includegraphics[height=2.2cm]{logo_emsi}
+    \fbox{\parbox[c][2.2cm][c]{6cm}{\centering\small Logo EMSI\\(remplacer par \texttt{logo\_emsi.png})}}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[c]{0.40\textwidth}
+    \raggedleft
+    % Décommenter quand logo_honoris.png est disponible :
+    % \includegraphics[height=2.2cm]{logo_honoris}
+    \fbox{\parbox[c][2.2cm][c]{4.5cm}{\centering\small Logo Honoris\\(remplacer par \texttt{logo\_honoris.png})}}
+  \end{minipage}
+
+  \vspace{1.8cm}
+
+  % ── Bloc institutionnel centré ────────────────────────────────
+  \begin{center}
+    {\large\bfseries Rapport de projet fin d'année}\\[0.4cm]
+    {\large\bfseries 4\textsuperscript{ème} année}\\[0.3cm]
+    {\Large\bfseries Ingénierie Informatique et Réseaux}\\[0.25cm]
+    {\normalsize\bfseries Cybersécurité \& Infrastructures Réseaux}\\[0.6cm]
+    {\normalsize Sous le thème}\\[0.3cm]
+    \noindent\rule{0.55\textwidth}{0.8pt}
+  \end{center}
+
+  \vspace{0.9cm}
+
+  % ── Titre principal ───────────────────────────────────────────
+  \begin{center}
+    {\fontsize{28}{34}\selectfont\bfseries SECUREWATCH}\\[0.5cm]
+    {\large\bfseries
+      Centralisation des Logs \&\\[0.2cm]
+      Détection d'Incidents de Sécurité
+    }
+  \end{center}
+
+  \vspace{0.5cm}
+
+  \begin{center}
+    \noindent\rule{0.55\textwidth}{0.8pt}
+  \end{center}
+
+  \vspace{1.6cm}
+
+  % ── Informations auteurs (bas gauche) ─────────────────────────
+  \noindent
+  \begin{minipage}[t]{0.55\textwidth}
+    \raggedright
+    {\bfseries Réalisé par :}\\[0.3cm]
+    Prénom et nom de l'étudiant\\[0.15cm]
+    Prénom et nom de l'étudiant\\[0.8cm]
+    {\bfseries Encadré par :}\\[0.3cm]
+    Tuteur de l'école : Pr. \underline{\hspace{4cm}}
+  \end{minipage}
+
+  \vfill
+
+  % ── Année universitaire (centré en bas) ───────────────────────
+  \begin{center}
+    {\normalsize\bfseries ANNEE UNIVERSITAIRE: 2025-2026}
+  \end{center}
+
+\end{titlepage}
+
+% ── Table des matières ────────────────────────────────────────
+\tableofcontents
+\clearpage
+
+% ── Listes des figures ────────────────────────────────────────
+\listoffigures
+\clearpage
+
+% ============================================================
+%  CHAPITRE 1 — INTRODUCTION
+% ============================================================
+\chapter{Introduction générale}
+
+\section{Contexte du projet}
+
+Dans un environnement informatique de plus en plus complexe et exposé aux cybermenaces,
+la capacité à détecter et à répondre rapidement aux incidents de sécurité est devenue
+un enjeu stratégique pour toute organisation. Les systèmes d'information modernes
+génèrent des volumes massifs de journaux applicatifs (\textit{logs}) dispersés sur de
+multiples services, rendant la corrélation manuelle des événements pratiquement impossible.
+
+Le projet \textbf{SecureWatch} répond à cette problématique en proposant une plateforme
+de centralisation des logs et de détection d'incidents de sécurité basée sur une
+architecture microservices déployée localement via Docker. Il s'inscrit dans le cadre
+des travaux pratiques de fin d'année (\textbf{PFA 2025-2026}) sur la modernisation des
+systèmes d'information par l'architecture microservices et le cloud local.
+
+\section{Problématique}
+
+Les systèmes de sécurité traditionnels souffrent de plusieurs limitations :
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Logs dispersés} : chaque service écrit ses journaux de manière
+        indépendante, rendant la corrélation difficile.
+  \item \textbf{Détection réactive} : les incidents sont souvent détectés après
+        coup, lorsque les dommages sont déjà causés.
+  \item \textbf{Pas de rate limiting} : les microservices exposés directement
+        sont vulnérables aux attaques par force brute et aux abus d'API.
+  \item \textbf{Absence de monitoring} : sans métriques temps réel, l'état de
+        santé du système n'est pas observable.
+\end{itemize}
+
+\section{Objectifs}
+
+\begin{successbox}[Objectifs du projet]
+\begin{enumerate}[leftmargin=*]
+  \item Centraliser tous les logs applicatifs dans un moteur de recherche unifié
+        (Elasticsearch) via un pipeline automatisé.
+  \item Détecter automatiquement les incidents de sécurité : brute force, accès
+        interdits, rate limiting, uploads suspects.
+  \item Sécuriser l'accès aux microservices via une API Gateway avec TLS, rate
+        limiting et isolation réseau.
+  \item Mettre en place un système de monitoring temps réel avec métriques,
+        dashboards et alertes automatiques.
+  \item Proposer un tableau de bord interactif accessible depuis un navigateur.
+\end{enumerate}
+\end{successbox}
+
+\section{Organisation du rapport}
+
+Ce rapport est structuré comme suit :
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Chapitre 2} — Architecture globale et choix technologiques
+  \item \textbf{Chapitre 3} — Pipeline de logs ELK Stack
+  \item \textbf{Chapitre 4} — API Gateway sécurisée (Nginx HTTPS)
+  \item \textbf{Chapitre 5} — Microservices Flask
+  \item \textbf{Chapitre 6} — Monitoring : Prometheus, Grafana, Alertmanager
+  \item \textbf{Chapitre 7} — Dashboard SecureWatch
+  \item \textbf{Chapitre 8} — Tests et simulation d'attaques
+  \item \textbf{Chapitre 9} — Conclusion et perspectives
+\end{itemize}
+
+% ============================================================
+%  CHAPITRE 2 — ARCHITECTURE
+% ============================================================
+\chapter{Architecture du système}
+
+\section{Vue d'ensemble}
+
+SecureWatch repose sur une architecture microservices containerisée via Docker Compose,
+composée de \textbf{13 conteneurs} répartis sur \textbf{3 réseaux Docker isolés}.
+L'architecture suit le principe de \textit{défense en profondeur} : chaque couche ajoute
+une barrière de sécurité supplémentaire.
+
+\screenshot{architecture_diagram}{Architecture globale de SecureWatch}{architecture}
+
+\begin{infobox}[Principe fondamental d'isolation]
+Les microservices (auth-service et api-service) n'ont \textbf{aucun port exposé}
+sur l'hôte. Tout trafic externe passe obligatoirement par l'API Gateway sur les
+ports 8080 (HTTP → redirection) et 8443 (HTTPS).
+\end{infobox}
+
+\section{Réseaux Docker}
+
+L'isolation réseau est assurée par trois réseaux Docker bridge distincts :
+
+\begin{table}[H]
+  \centering
+  \caption{Réseaux Docker et leurs rôles}
+  \begin{tabularx}{\textwidth}{@{}lX@{}}
+    \toprule
+    \textbf{Réseau} & \textbf{Services inclus \& rôle} \\
+    \midrule
+    \texttt{gateway-net}
+      & gateway, auth-service, api-service, nginx-exporter, frontend.
+        Routage interne : la gateway est le seul point d'entrée vers les microservices. \\
+    \addlinespace
+    \texttt{monitoring-net}
+      & prometheus, alertmanager, grafana, node-exporter, nginx-exporter,
+        auth-service, api-service, gateway.
+        Permet à Prometheus de scraper les métriques de tous les services. \\
+    \addlinespace
+    \texttt{elk}
+      & elasticsearch, logstash, kibana, filebeat, auth-service, api-service,
+        gateway, frontend.
+        Canal de centralisation des logs vers Elasticsearch. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{Flux de données}
+
+\screenshot[0.90\textwidth]{flux_donnees}{Flux de données entre les composants}{flux}
+
+Deux flux parallèles coexistent :
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Flux de logs (ELK)} : chaque requête est enregistrée en JSON dans
+        \texttt{/logs/*.log}. Filebeat collecte ces fichiers et les envoie à Logstash
+        qui enrichit et tague chaque événement avant de l'indexer dans Elasticsearch.
+  \item \textbf{Flux de métriques (Prometheus)} : chaque microservice expose un endpoint
+        \texttt{/metrics} au format Prometheus. Prometheus scrape ces métriques toutes les
+        15 secondes. Grafana visualise et Alertmanager gère les alertes.
+\end{enumerate}
+
+\section{Choix technologiques}
+
+\begin{table}[H]
+  \centering
+  \caption{Technologies utilisées et justification}
+  \begin{tabularx}{\textwidth}{@{}llX@{}}
+    \toprule
+    \textbf{Technologie} & \textbf{Version} & \textbf{Justification} \\
+    \midrule
+    Nginx               & Alpine  & Légèreté, performance, modules SSL et rate limiting natifs \\
+    Elasticsearch       & 8.12.0  & Moteur de recherche distribué, full-text, scalable \\
+    Logstash            & 8.12.0  & Pipeline ETL flexible avec filtres Grok et Ruby \\
+    Kibana              & 8.12.0  & Visualisation native ELK, tableaux de bord avancés \\
+    Filebeat            & 8.12.0  & Agent léger de collecte de logs, faible empreinte CPU \\
+    Prometheus          & Latest  & Standard de facto pour les métriques cloud-native \\
+    Grafana             & Latest  & Dashboards riches, auto-provisioning via fichiers YAML \\
+    Alertmanager        & Latest  & Routage d'alertes, déduplication, inhibition \\
+    Python / Flask      & 3.11    & Rapidité de développement, bibliothèque Prometheus native \\
+    Docker Compose      & Latest  & Orchestration locale simple et reproductible \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+% ============================================================
+%  CHAPITRE 3 — ELK STACK
+% ============================================================
+\chapter{Pipeline de logs — ELK Stack}
+
+\section{Vue d'ensemble du pipeline}
+
+Le pipeline de centralisation des logs suit la chaîne :
+
+\begin{center}
+  \texttt{Services} $\rightarrow$ \texttt{/logs/*.log} $\rightarrow$
+  \texttt{Filebeat} $\rightarrow$ \texttt{Logstash:5044} $\rightarrow$
+  \texttt{Elasticsearch:9200} $\rightarrow$ \texttt{Kibana / Dashboard}
+\end{center}
+
+\section{Format des logs JSON}
+
+Chaque service écrit ses logs au format JSON structuré dans un volume partagé.
+Ce format est essentiel pour que Logstash puisse parser et enrichir les événements
+sans règles Grok complexes.
+
+\begin{lstlisting}[style=yaml, caption={Exemple de log brute\_force généré par auth-service}]
+{
+  "timestamp": "2026-05-16T02:54:36.894Z",
+  "service": "auth-service",
+  "level": "CRITICAL",
+  "event_type": "brute_force",
+  "ip": "185.220.101.5",
+  "failed_attempts": 10,
+  "alert_type": "BRUTE_FORCE",
+  "message": "BRUTE FORCE ATTACK detected from IP 185.220.101.5"
+}
+\end{lstlisting}
+
+\section{Filebeat — collecte des fichiers}
+
+Filebeat surveille le répertoire \texttt{/logs/} et envoie chaque nouvelle ligne
+vers Logstash. Sa configuration est minimale et non-intrusive.
+
+\section{Logstash — enrichissement et tagging}
+
+Logstash est le cœur du pipeline. Son rôle est de :
+\begin{enumerate}[leftmargin=*]
+  \item Parser le JSON et normaliser le champ \texttt{@timestamp}
+  \item Enrichir chaque événement avec des tags de sécurité selon son type
+  \item Indexer dans Elasticsearch avec le pattern \texttt{security-logs-YYYY.MM.dd}
+\end{enumerate}
+
+La logique de tagging sécurité :
+
+\begin{table}[H]
+  \centering
+  \caption{Règles de tagging Logstash}
+  \begin{tabularx}{\textwidth}{@{}llX@{}}
+    \toprule
+    \textbf{Condition} & \textbf{Tags ajoutés} & \textbf{alert\_type} \\
+    \midrule
+    \texttt{event\_type = brute\_force}          & brute\_force, security\_event, critical  & BRUTE\_FORCE \\
+    \texttt{event\_type = auth\_failure}          & auth\_failure, security\_event           & AUTH\_FAILURE \\
+    \texttt{event\_type = forbidden\_access}      & forbidden\_access, security\_event       & FORBIDDEN \\
+    \texttt{event\_type = unauthorized\_access}   & unauthorized, security\_event            & UNAUTHORIZED \\
+    \texttt{event\_type = suspicious\_upload}     & suspicious\_upload, security\_event      & SUSPICIOUS\_UPLOAD \\
+    \texttt{status = 429}                         & rate\_limited, security\_event           & RATE\_LIMITED \\
+    \texttt{level = ERROR / status = 500}         & server\_error                            & SERVER\_ERROR \\
+    \texttt{service = api-gateway}                & gateway                                  & — \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{Elasticsearch — stockage et indexation}
+
+Elasticsearch indexe tous les événements dans l'index \texttt{security-logs-*}.
+Il offre des capacités de recherche full-text, d'agrégation et de filtrage
+nécessaires pour le dashboard SecureWatch et les alertes.
+
+\section{Kibana — exploration des logs}
+
+\screenshot{kibana_discover}{Kibana — index security-logs-* avec filtres de sécurité}{kibana}
+
+Kibana permet d'explorer les logs via l'interface Discover, de créer des
+visualisations et de rechercher des événements spécifiques grâce aux requêtes
+KQL (\textit{Kibana Query Language}).
+
+% ============================================================
+%  CHAPITRE 4 — API GATEWAY
+% ============================================================
+\chapter{API Gateway sécurisée}
+
+\section{Rôle et position dans l'architecture}
+
+L'API Gateway Nginx constitue l'unique point d'entrée vers les microservices.
+Elle remplit quatre fonctions essentielles :
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Terminaison TLS} : déchiffrement HTTPS, certificat auto-signé RSA 2048
+  \item \textbf{Rate limiting} : protection contre le brute force et les abus d'API
+  \item \textbf{Reverse proxy} : routage des requêtes vers les microservices internes
+  \item \textbf{Journalisation} : logs JSON structurés de chaque requête
+\end{enumerate}
+
+\section{Configuration HTTPS / TLS}
+
+La gateway écoute sur deux ports :
+
+\begin{table}[H]
+  \centering
+  \caption{Ports de l'API Gateway}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Port} & \textbf{Protocole} & \textbf{Comportement} \\
+    \midrule
+    8080 & HTTP  & Redirection 301 vers \texttt{https://<host>:8443} \\
+    8443 & HTTPS & Toutes les routes API (/auth/*, /api/*) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Les en-têtes de sécurité appliqués à toutes les réponses HTTPS :
+
+\begin{lstlisting}[style=bash, caption={En-têtes de sécurité HTTP}]
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Frame-Options: DENY
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 1; mode=block
+X-Gateway: SecureWatch-PFA-2026
+\end{lstlisting}
+
+\section{Zones de rate limiting}
+
+Nginx implémente le rate limiting via l'algorithme du \textit{leaky bucket} :
+
+\begin{table}[H]
+  \centering
+  \caption{Zones de rate limiting configurées}
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    \textbf{Zone} & \textbf{Limite} & \textbf{Burst} & \textbf{Cible} \\
+    \midrule
+    \texttt{auth\_zone}   & 5 req/min par IP  & 10  & Toutes les routes \texttt{/auth/*} \\
+    \texttt{api\_zone}    & 30 req/min par IP & 50  & Toutes les routes \texttt{/api/*} \\
+    \texttt{global\_zone} & 100 req/min par IP & 200 & Protection DDoS globale \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Tout dépassement retourne une réponse \textbf{HTTP 429} avec un corps JSON et
+un log enregistré dans ELK avec le tag \texttt{rate\_limited}.
+
+\begin{lstlisting}[style=yaml, caption={Réponse HTTP 429 personnalisée}]
+{
+  "error": "Too Many Requests",
+  "message": "Rate limit exceeded. Please slow down.",
+  "service": "api-gateway"
+}
+\end{lstlisting}
+
+\section{Logs JSON de la gateway}
+
+Chaque requête traversant la gateway génère un log JSON structuré :
+
+\begin{lstlisting}[style=yaml, caption={Format de log JSON de la gateway}]
+{
+  "timestamp": "2026-05-16T03:15:22+00:00",
+  "service": "api-gateway",
+  "level": "INFO",
+  "ip": "185.220.101.5",
+  "method": "POST",
+  "uri": "/auth/login",
+  "status": 429,
+  "upstream": "172.20.0.5:5001",
+  "request_time": "0.002",
+  "event_type": "gateway_request"
+}
+\end{lstlisting}
+
+\screenshot[0.85\textwidth]{gateway_rate_limit}{Démonstration du rate limiting — terminal lors du scénario rate-limit}{ratelimit}
+
+% ============================================================
+%  CHAPITRE 5 — MICROSERVICES
+% ============================================================
+\chapter{Microservices Flask}
+
+\section{Auth Service}
+
+Le service d'authentification (\texttt{auth-service:5001}) gère les connexions
+et émet des logs de sécurité pour chaque tentative. Il expose également des
+métriques Prometheus via la bibliothèque \texttt{prometheus-flask-exporter}.
+
+\subsection{Endpoints}
+
+\begin{table}[H]
+  \centering
+  \caption{Endpoints de auth-service}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Méthode} & \textbf{Route} & \textbf{Description} \\
+    \midrule
+    GET  & \texttt{/health}   & Health check (retourné via gateway à \texttt{/auth/health}) \\
+    POST & \texttt{/login}    & Authentification — retourne un token si succès \\
+    POST & \texttt{/logout}   & Déconnexion \\
+    POST & \texttt{/register} & Enregistrement d'un nouvel utilisateur \\
+    GET  & \texttt{/metrics}  & Métriques Prometheus (scrappé par Prometheus) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Métriques Prometheus exposées}
+
+\begin{lstlisting}[language=Python, caption={Compteurs Prometheus dans auth-service}]
+from prometheus_flask_exporter import PrometheusMetrics
+from prometheus_client import Counter
+
+metrics = PrometheusMetrics(app, default_labels={'service': 'auth-service'})
+
+auth_failures_total = Counter(
+    'auth_failures_total',
+    'Total authentication failures',
+    ['ip']
+)
+brute_force_total = Counter(
+    'brute_force_total',
+    'Brute force attacks detected',
+    ['ip']
+)
+\end{lstlisting}
+
+\subsection{Détection brute force}
+
+Auth-service détecte automatiquement les attaques brute force : si une même IP
+échoue \textbf{5 fois ou plus} en peu de temps, un événement \texttt{brute\_force}
+est loggé avec le niveau CRITICAL et le compteur Prometheus \texttt{brute\_force\_total}
+est incrémenté.
+
+\section{API Service}
+
+Le service API (\texttt{api-service:5002}) expose les ressources de l'application
+et génère différents types d'incidents de sécurité selon les accès.
+
+\subsection{Endpoints}
+
+\begin{table}[H]
+  \centering
+  \caption{Endpoints de api-service}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Méthode} & \textbf{Route} & \textbf{Résultat} \\
+    \midrule
+    GET  & \texttt{/api/data}    & Données publiques (200) \\
+    GET  & \texttt{/api/users}   & Liste utilisateurs — token requis (200/401) \\
+    GET  & \texttt{/api/reports} & Rapports — token requis (200/401) \\
+    GET  & \texttt{/api/admin}   & Zone admin — accès restreint (403) \\
+    GET  & \texttt{/api/config}  & Configuration — accès restreint (403) \\
+    POST & \texttt{/api/upload}  & Upload — détection MIME suspects (200/415) \\
+    GET  & \texttt{/health}      & Health check \\
+    GET  & \texttt{/metrics}     & Métriques Prometheus \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Comptes de test}
+
+\begin{table}[H]
+  \centering
+  \caption{Comptes utilisateurs de test}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Utilisateur} & \textbf{Mot de passe} & \textbf{Rôle} \\
+    \midrule
+    \texttt{admin}    & \texttt{password123} & Administrateur \\
+    \texttt{user1}    & \texttt{secret456}   & Utilisateur standard \\
+    \texttt{operator} & \texttt{ops789}      & Opérateur \\
+    \texttt{hicham}   & \texttt{pfa2026}     & Utilisateur standard \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+%  CHAPITRE 6 — MONITORING
+% ============================================================
+\chapter{Monitoring — Prometheus, Grafana \& Alertmanager}
+
+\section{Prometheus}
+
+Prometheus est le système de collecte de métriques. Il scrape chaque cible
+toutes les \textbf{15 secondes} et évalue les règles d'alertes toutes les
+\textbf{30 secondes}.
+
+\subsection{Cibles de scraping}
+
+\begin{table}[H]
+  \centering
+  \caption{Cibles Prometheus (targets)}
+  \begin{tabularx}{\textwidth}{@{}llX@{}}
+    \toprule
+    \textbf{Job} & \textbf{Cible} & \textbf{Métriques clés} \\
+    \midrule
+    auth-service   & auth-service:5001/metrics  & \texttt{auth\_failures\_total}, \texttt{brute\_force\_total}, \texttt{flask\_http\_request\_total} \\
+    api-service    & api-service:5002/metrics   & \texttt{forbidden\_access\_total}, \texttt{server\_errors\_total}, \texttt{flask\_http\_request\_total} \\
+    nginx-gateway  & nginx-exporter:9113        & \texttt{nginx\_http\_requests\_total}, \texttt{nginx\_connections\_active} \\
+    node-exporter  & node-exporter:9100         & \texttt{node\_cpu\_seconds\_total}, \texttt{node\_memory\_*} \\
+    alertmanager   & alertmanager:9093          & \texttt{alertmanager\_alerts}, \texttt{alertmanager\_notifications\_total} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\screenshot{prometheus_targets}{Interface Prometheus — état des cibles de scraping}{prometheus_targets}
+
+\section{Règles d'alertes}
+
+8 règles d'alertes sont définies dans \texttt{monitoring/alert\_rules.yml},
+réparties en deux groupes :
+
+\subsection{Groupe Sécurité}
+
+\begin{table}[H]
+  \centering
+  \caption{Règles d'alertes — Sécurité}
+  \begin{tabularx}{\textwidth}{@{}lXll@{}}
+    \toprule
+    \textbf{Alerte} & \textbf{Expression PromQL} & \textbf{Sév.} & \textbf{Délai} \\
+    \midrule
+    BruteForceDetected   & \texttt{increase(brute\_force\_total[5m]) > 0}                                    & critical & immédiat \\
+    HighAuthFailureRate  & \texttt{rate(auth\_failures\_total[5m]) * 60 > 3}                                 & warning  & 2 min \\
+    RateLimitViolations  & \texttt{increase(flask\_http\_request\_total\{status="429"\}[5m]) > 5}            & warning  & immédiat \\
+    ForbiddenAccessSpike & \texttt{rate(flask\_http\_request\_total\{status="403"\}[5m]) * 60 > 5}           & warning  & 2 min \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Groupe Infrastructure}
+
+\begin{table}[H]
+  \centering
+  \caption{Règles d'alertes — Infrastructure}
+  \begin{tabularx}{\textwidth}{@{}lXll@{}}
+    \toprule
+    \textbf{Alerte} & \textbf{Expression PromQL} & \textbf{Sév.} & \textbf{Délai} \\
+    \midrule
+    ServiceDown      & \texttt{up == 0}                                                                       & critical & 1 min \\
+    HighCPUUsage     & \texttt{(1 - avg(rate(node\_cpu\_seconds\_total\{mode="idle"\}[5m]))) * 100 > 80}     & warning  & 2 min \\
+    HighMemoryUsage  & \texttt{(1 - node\_memory\_MemAvailable\_bytes / node\_memory\_MemTotal\_bytes) * 100 > 85} & warning & 2 min \\
+    HighErrorRate    & \texttt{rate(flask\_http\_request\_total\{status=\textasciitilde"5.."\}[5m]) > 0.1}  & warning  & 2 min \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\screenshot{prometheus_alerts}{Interface Prometheus — règle BruteForceDetected en état \textit{firing}}{prometheus_alerts}
+
+\section{Alertmanager}
+
+Alertmanager reçoit les alertes de Prometheus et les route selon leur sévérité.
+Il implémente trois mécanismes importants :
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Groupement} : les alertes de même nature sont regroupées
+        pour éviter la multiplication des notifications.
+  \item \textbf{Inhibition} : si \texttt{ServiceDown} est actif pour un job,
+        les alertes infrastructure dérivées de ce même job sont supprimées.
+  \item \textbf{Routage différencié} : alertes critiques → délai 10 s,
+        répétition 30 min ; alertes sécurité → délai 15 s, répétition 45 min.
+\end{itemize}
+
+\screenshot{alertmanager_ui}{Interface Alertmanager — alerte BruteForceDetected active}{alertmanager}
+
+\section{Grafana}
+
+Grafana est configuré avec deux dashboards \textbf{auto-provisionnés} au
+démarrage via des fichiers JSON. Aucune configuration manuelle n'est requise.
+
+\subsection{Dashboard Infrastructure}
+
+\screenshot{grafana_infra}{Grafana — Dashboard Infrastructure SecureWatch}{grafana_infra}
+
+Panels inclus :
+\begin{itemize}[leftmargin=*]
+  \item Utilisation CPU (\%) — requête : \texttt{(1 - avg(rate(node\_cpu\_seconds\_total\{mode="idle"\}[1m]))) * 100}
+  \item RAM utilisée (Go)
+  \item Requêtes HTTP/s par service
+  \item Temps de réponse p95
+  \item Taux d'erreurs 5xx/s
+\end{itemize}
+
+\subsection{Dashboard Sécurité}
+
+\screenshot{grafana_security}{Grafana — Dashboard Sécurité SecureWatch}{grafana_security}
+
+Panels inclus :
+\begin{itemize}[leftmargin=*]
+  \item Compteur brute force total
+  \item Courbes 403, 429, auth failures sur 30 minutes
+  \item Distribution des accès par endpoint
+  \item Répartition des codes HTTP
+\end{itemize}
+
+% ============================================================
+%  CHAPITRE 7 — DASHBOARD SECUREWATCH
+% ============================================================
+\chapter{Dashboard SecureWatch}
+
+\section{Vue d'ensemble}
+
+Le dashboard SecureWatch est une interface web développée en HTML/CSS/JavaScript
+pur, servie par un conteneur Nginx. Il interroge Elasticsearch via un proxy nginx
+(évitant les problèmes CORS) et Prometheus via un second proxy.
+
+\screenshot{dashboard_overview}{Dashboard SecureWatch — vue d'ensemble du tableau de bord}{dashboard}
+
+\section{Sections du dashboard}
+
+\subsection{Tableau de bord}
+
+Rafraîchissement automatique toutes les \textbf{8 secondes}. Affiche :
+\begin{itemize}[leftmargin=*]
+  \item Compteurs en temps réel : total événements, échecs auth, accès interdits,
+        erreurs système, brute force détectés
+  \item Graphique de tendance des événements par heure (12 dernières heures)
+  \item Donut de répartition par type d'événement
+\end{itemize}
+
+\subsection{Flux de Logs}
+
+Table des 1\,000 derniers événements non-trivaux (santé et démarrages exclus),
+filtrable par niveau, service et texte libre. Chaque ligne affiche :
+timestamp, niveau coloré (INFO / WARNING / ERROR / CRITICAL), service, message.
+
+\screenshot{dashboard_logs}{Dashboard SecureWatch — flux de logs avec filtre niveau CRITICAL}{logs}
+
+\subsection{Alertes de Sécurité}
+
+\screenshot{dashboard_alertes}{Dashboard SecureWatch — alertes détectées après simulation brute force}{alertes}
+
+Détection automatique côté client basée sur les données Elasticsearch :
+
+\begin{table}[H]
+  \centering
+  \caption{Règles de détection des alertes dans le dashboard}
+  \begin{tabularx}{\textwidth}{@{}llX@{}}
+    \toprule
+    \textbf{Type} & \textbf{Sévérité} & \textbf{Condition} \\
+    \midrule
+    Brute Force     & CRITIQUE & Présence d'un événement \texttt{brute\_force} pour une IP \\
+    Brute Force     & CRITIQUE & $\geq$ 5 échecs auth depuis la même IP en 24h \\
+    Accès Interdit  & ÉLEVÉ    & $\geq$ 5 accès \texttt{forbidden\_access} depuis la même IP \\
+    Erreurs Système & MOYEN    & $\geq$ 5 erreurs 500 sur le même service \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{infobox}[Note technique — Source des données 429]
+Les réponses HTTP 429 sont générées par la gateway Nginx \textbf{avant} que la
+requête n'atteigne Flask. Par conséquent, \texttt{flask\_http\_request\_total\{status="429"\}}
+est toujours vide dans Prometheus. Les panneaux 429 du dashboard utilisent
+Elasticsearch (logs d'accès JSON de la gateway) comme source alternative.
+\end{infobox}
+
+\subsection{Monitoring Prometheus}
+
+\screenshot{dashboard_monitoring_infra}{Dashboard SecureWatch — onglet Monitoring, vue Infrastructure}{monitoring_infra}
+
+\screenshot{dashboard_monitoring_security}{Dashboard SecureWatch — onglet Monitoring, vue Sécurité}{monitoring_sec}
+
+Panneaux Chart.js alimentés par Prometheus (sauf 429, source ES) :
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Infrastructure} : CPU hôte, RAM, requêtes HTTP/s par service,
+        graphique CPU 30 min, graphique RAM 30 min
+  \item \textbf{Sécurité} : brute force total, 403 total, 429 total (ES),
+        500 total, graphique auth failures/min, graphique 429/min, graphique combiné
+\end{itemize}
+
+\subsection{État des Services}
+
+\screenshot{dashboard_services}{Dashboard SecureWatch — grille de statut des services}{services}
+
+Grille de statut en temps réel pour les 11 services. Chaque service est sondé
+via un proxy nginx côté frontend (évite les restrictions CORS du navigateur).
+
+% ============================================================
+%  CHAPITRE 8 — TESTS ET SIMULATION
+% ============================================================
+\chapter{Tests et simulation d'attaques}
+
+\section{Script de simulation}
+
+Le fichier \texttt{scripts/generate\_attacks.py} implémente 6 scénarios d'attaque
+ciblant la gateway via HTTPS (\texttt{https://localhost:8443}).
+
+\begin{infobox}[Note HTTPS]
+Depuis l'implémentation de TLS sur la gateway, le script utilise
+\texttt{verify=False} pour accepter le certificat auto-signé, et les alertes
+\texttt{InsecureRequestWarning} sont supprimées pour un affichage propre.
+\end{infobox}
+
+\section{Scénario 1 — Attaque Brute Force}
+
+\textbf{Objectif} : simuler une attaque par dictionnaire sur \texttt{/auth/login}.
+
+\begin{lstlisting}[style=bash, caption={Lancement du scénario brute force}]
+python scripts/generate_attacks.py --scenario brute-force
+\end{lstlisting}
+
+\textbf{Comportement} :
+\begin{itemize}[leftmargin=*]
+  \item 8 à 12 tentatives avec credentials invalides depuis une IP attaquante
+        (ex: 185.220.101.5, 10.0.0.5, 192.168.1.42)
+  \item Chaque tentative → HTTP 401 + log \texttt{auth\_failure}
+  \item Après $\geq$ 5 échecs : log \texttt{brute\_force} CRITICAL + incrémentation
+        de \texttt{brute\_force\_total} dans Prometheus
+\end{itemize}
+
+\textbf{Résultats observables} :
+\begin{itemize}[leftmargin=*]
+  \item[\cmark] Alerte \textbf{BRUTE FORCE} dans le dashboard (section Alertes)
+  \item[\cmark] Règle \texttt{BruteForceDetected} en état FIRING dans Prometheus
+  \item[\cmark] Alerte active dans Alertmanager
+  \item[\cmark] Logs CRITICAL visibles dans Kibana (\texttt{event\_type: brute\_force})
+\end{itemize}
+
+\section{Scénario 2 — Scan de Routes Interdites}
+
+\textbf{Objectif} : simuler un attaquant cherchant des ressources sensibles.
+
+\begin{lstlisting}[style=bash]
+python scripts/generate_attacks.py --scenario forbidden-scan
+\end{lstlisting}
+
+Routes scannées : \texttt{/admin}, \texttt{/config}, \texttt{/secrets},
+\texttt{/users}, \texttt{/debug}, \texttt{/env}, \texttt{/backup},
+\texttt{/keys}, \texttt{/tokens}.
+
+\textbf{Résultats observables} :
+\begin{itemize}[leftmargin=*]
+  \item[\cmark] HTTP 403 pour les routes protégées, 404 pour les routes inexistantes
+  \item[\cmark] Logs \texttt{forbidden\_access} dans ELK
+  \item[\cmark] Alerte \textbf{ACCÈS INTERDIT} dans le dashboard après 2 exécutions ($\geq$ 5 par IP)
+\end{itemize}
+
+\section{Scénario 6 — Test Rate Limiting}
+
+\textbf{Objectif} : démontrer le rate limiting de la gateway en saturant les zones.
+
+\begin{lstlisting}[style=bash]
+python scripts/generate_attacks.py --scenario rate-limit
+\end{lstlisting}
+
+\textbf{Phase 1 — API} : 60 requêtes vers \texttt{/api/data} (limite 30/min, burst 50).
+Les 429 apparaissent à partir de la 38\textsuperscript{e} requête.
+
+\textbf{Phase 2 — Auth} : 10 tentatives de login invalides (limite 5/min, burst 10).
+Les 429 apparaissent dès la 2\textsuperscript{e} requête.
+
+\screenshot[0.85\textwidth]{rate_limit_terminal}{Sortie terminal — scénario rate-limit avec 25 requêtes bloquées sur 70}{ratelimit_term}
+
+\section{Résultats consolidés}
+
+Après exécution de l'ensemble des scénarios :
+
+\begin{table}[H]
+  \centering
+  \caption{Statistiques Elasticsearch après simulation complète}
+  \begin{tabular}{@{}lr@{}}
+    \toprule
+    \textbf{Type d'événement} & \textbf{Occurrences} \\
+    \midrule
+    \texttt{health\_check}      & 2\,745 \\
+    \texttt{gateway\_request}   & 888 \\
+    \texttt{api\_access}        & 274 \\
+    \texttt{auth\_failure}      & 147 \\
+    \texttt{service\_start}     & 92 \\
+    \texttt{brute\_force}       & 87 \\
+    \texttt{not\_found}         & 80 \\
+    \texttt{suspicious\_upload} & 55 \\
+    \texttt{auth\_success}      & 39 \\
+    \texttt{forbidden\_access}  & 26 \\
+    \texttt{server\_error}      & 26 \\
+    \texttt{unauthorized\_access} & 15 \\
+    \midrule
+    \textbf{Total}              & \textbf{4\,474+} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+%  CHAPITRE 9 — CONCLUSION
+% ============================================================
+\chapter{Conclusion et perspectives}
+
+\section{Bilan du projet}
+
+Le projet SecureWatch atteint l'ensemble de ses objectifs initiaux :
+
+\begin{successbox}[Réalisations]
+\begin{itemize}[leftmargin=*]
+  \item[\cmark] \textbf{Pipeline de logs complet} : Filebeat → Logstash (tagging sécurité) → Elasticsearch → Kibana
+  \item[\cmark] \textbf{API Gateway HTTPS} : TLS auto-signé, rate limiting 3 zones, logs JSON, isolation réseau
+  \item[\cmark] \textbf{Monitoring temps réel} : Prometheus (5 targets), Grafana (2 dashboards auto), Alertmanager (8 règles)
+  \item[\cmark] \textbf{Dashboard interactif} : 4 sections, panels Chart.js, détection d'incidents, source hybride ES/Prometheus
+  \item[\cmark] \textbf{Simulation d'attaques} : 6 scénarios couvrant brute force, forbidden scan, rate limiting, uploads suspects
+  \item[\cmark] \textbf{13 services} orchestrés via Docker Compose sur 3 réseaux isolés
+\end{itemize}
+\end{successbox}
+
+\section{Difficultés rencontrées}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Initialisation des graphiques Chart.js} : les canvas dans des sections
+        masquées (\texttt{display:none}) ont des dimensions nulles. Résolu par une
+        initialisation paresseuse (\textit{lazy init}) déclenchée uniquement lors de
+        la navigation vers la section Monitoring.
+  \item \textbf{Métriques 429 absentes de Prometheus} : Nginx bloque les requêtes
+        rate-limitées avant qu'elles n'atteignent Flask. Résolu en interrogeant
+        Elasticsearch directement pour les données 429.
+  \item \textbf{Cache DNS Nginx} : après recréation d'un conteneur, le frontend Nginx
+        conserve l'ancienne IP Prometheus. Résolu par \texttt{nginx -s reload}.
+  \item \textbf{Flood de health\_check} : les 2\,745 événements de health check
+        occupaient les 1\,000 premiers résultats de la requête ES, masquant les
+        événements de sécurité. Résolu en excluant ces types via \texttt{must\_not}.
+\end{itemize}
+
+\section{Perspectives d'évolution}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Notifications Alertmanager} : configurer des receivers email/Slack/Discord
+        pour les alertes critiques en production.
+  \item \textbf{Certificat TLS signé par CA} : remplacer le certificat auto-signé
+        par Let's Encrypt ou une CA interne.
+  \item \textbf{Authentification dashboard} : ajouter une couche d'authentification
+        (JWT ou session) sur SecureWatch lui-même.
+  \item \textbf{Machine learning} : intégrer des modèles de détection d'anomalies
+        sur les séries temporelles Prometheus (ex: LSTM pour les pics de trafic).
+  \item \textbf{Déploiement cloud} : porter l'architecture sur Kubernetes avec
+        Helm charts pour un déploiement en production.
+  \item \textbf{Tests de charge} : intégrer Locust ou k6 pour des tests de performance
+        automatisés et calibrer les zones de rate limiting.
+\end{itemize}
+
+% ── Bibliographie ─────────────────────────────────────────────
+\begin{thebibliography}{99}
+
+\bibitem{elk}
+Elastic N.V. (2024).
+\textit{Elasticsearch Reference 8.12}.
+\url{https://www.elastic.co/guide/en/elasticsearch/reference/8.12/index.html}
+
+\bibitem{prometheus}
+Prometheus Authors (2024).
+\textit{Prometheus Documentation}.
+\url{https://prometheus.io/docs/introduction/overview/}
+
+\bibitem{nginx}
+NGINX, Inc. (2024).
+\textit{NGINX Documentation — Rate Limiting}.
+\url{https://nginx.org/en/docs/http/ngx_http_limit_req_module.html}
+
+\bibitem{docker}
+Docker, Inc. (2024).
+\textit{Docker Compose Documentation}.
+\url{https://docs.docker.com/compose/}
+
+\bibitem{grafana}
+Grafana Labs (2024).
+\textit{Grafana Documentation — Provisioning}.
+\url{https://grafana.com/docs/grafana/latest/administration/provisioning/}
+
+\bibitem{alertmanager}
+Prometheus Authors (2024).
+\textit{Alertmanager Documentation}.
+\url{https://prometheus.io/docs/alerting/latest/alertmanager/}
+
+\bibitem{flask}
+Pallets Projects (2024).
+\textit{Flask Documentation}.
+\url{https://flask.palletsprojects.com/}
+
+\end{thebibliography}
+
+\end{document}

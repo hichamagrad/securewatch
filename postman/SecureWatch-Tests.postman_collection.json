@@ -1,0 +1,499 @@
+{
+  "info": {
+    "name": "SecureWatch — API Gateway Tests",
+    "_postman_id": "securewatch-pfa-2026",
+    "description": "Collection de tests pour SecureWatch PFA 2025-2026.\nTous les appels passent par l'API Gateway (http://localhost:8080).\n\nDossiers :\n1. Santé — health checks\n2. Tests normaux — flux authentifiés OK\n3. Tests sécurité — brute force, 403, token manquant\n4. Tests rate limit — rafale → 429\n5. Accès directs bloqués — vérification isolation des ports",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "gateway", "value": "http://localhost:8080", "type": "string" },
+    { "key": "token",   "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1 — Santé",
+      "item": [
+        {
+          "name": "GET /auth/health",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/auth/health",
+            "description": "Health check du auth-service via la gateway"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Service healthy', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.status).to.eql('healthy');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/health",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/health",
+            "description": "Health check du api-service via la gateway (redirige vers /health interne)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Service healthy', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.status).to.eql('healthy');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2 — Tests normaux",
+      "item": [
+        {
+          "name": "POST /auth/login — succès",
+          "request": {
+            "method": "POST",
+            "url": "{{gateway}}/auth/login",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"username\": \"admin\", \"password\": \"password123\"}"
+            },
+            "description": "Connexion valide → 200 + token JWT mock"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Token présent', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('token');",
+                  "  pm.collectionVariables.set('token', json.token);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/users — avec token",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/users",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "description": "Liste des utilisateurs — nécessite Bearer token"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Users présents', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('users');",
+                  "  pm.expect(json.users).to.be.an('array').with.length.above(0);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/data — avec token",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/data",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "description": "Données métier — 200 OK ou 500 aléatoire (10% de chance)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 ou 500', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 500]);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/reports — avec token",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/reports",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "description": "Rapport liste — nécessite Bearer token"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Reports présents', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('reports');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/register",
+          "request": {
+            "method": "POST",
+            "url": "{{gateway}}/auth/register",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"username\": \"newuser\", \"password\": \"newpass123\"}"
+            },
+            "description": "Enregistrement d'un nouvel utilisateur → 201"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /api/upload — JSON (normal)",
+          "request": {
+            "method": "POST",
+            "url": "{{gateway}}/api/upload",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"filename\": \"rapport.json\", \"size\": 1024}"
+            },
+            "description": "Upload JSON — type sûr, suspicious=false"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Non suspect', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.suspicious).to.be.false;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3 — Tests sécurité",
+      "item": [
+        {
+          "name": "POST /auth/login — mauvais mot de passe",
+          "request": {
+            "method": "POST",
+            "url": "{{gateway}}/auth/login",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"username\": \"admin\", \"password\": \"wrong\"}"
+            },
+            "description": "Mauvaise authentification → 401, log WARNING auth_failure"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));",
+                  "pm.test('Error message', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/login — brute force (x5)",
+          "request": {
+            "method": "POST",
+            "url": "{{gateway}}/auth/login",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"username\": \"admin\", \"password\": \"hack{{$randomInt}}\"}"
+            },
+            "description": "Répéter 5+ fois pour déclencher la détection brute force CRITICAL dans les logs"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401 (attendu)', () => pm.response.to.have.status(401));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/admin — accès interdit",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/admin",
+            "description": "Panel admin toujours refusé → 403, log WARNING forbidden_access"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403', () => pm.response.to.have.status(403));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/config — accès interdit",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/config",
+            "description": "Config toujours refusée → 403"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403', () => pm.response.to.have.status(403));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/users — sans token",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/users",
+            "description": "Accès sans Authorization header → 401 unauthorized_access"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /api/upload — exécutable suspect",
+          "request": {
+            "method": "POST",
+            "url": "{{gateway}}/api/upload",
+            "header": [{ "key": "Content-Type", "value": "application/x-msdownload" }],
+            "body": {
+              "mode": "raw",
+              "raw": "MZ fake PE binary"
+            },
+            "description": "Upload type suspect (exe/dll) → log WARNING suspicious_upload"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Marqué suspect', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.suspicious).to.be.true;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /gateway/inexistant — 404 JSON",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/inexistant",
+            "description": "Route non exposée → 404 JSON depuis la gateway"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('JSON error', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4 — Tests rate limit",
+      "description": "Envoyer cette requête rapidement en rafale (Runner > Iterations=30, Delay=0) pour déclencher des 429",
+      "item": [
+        {
+          "name": "GET /api/data — rafale (→ 429)",
+          "request": {
+            "method": "GET",
+            "url": "{{gateway}}/api/data",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "description": "Dépasse la limite api_zone (30 req/min) → 429 Too Many Requests.\nUtiliser Collection Runner : 40 itérations, délai 0ms."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ou 429', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 429, 500]);",
+                  "});",
+                  "if (pm.response.code === 429) {",
+                  "  console.log('Rate limit déclenché — 429 reçu');",
+                  "  pm.test('Corps JSON 429', () => {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.error).to.eql('Too Many Requests');",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/login — rafale auth (→ 429)",
+          "request": {
+            "method": "POST",
+            "url": "{{gateway}}/auth/login",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"username\": \"admin\", \"password\": \"password123\"}"
+            },
+            "description": "Dépasse la limite auth_zone (5 req/min) → 429.\nUtiliser Collection Runner : 10 itérations, délai 0ms."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ou 429', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 401, 429]);",
+                  "});",
+                  "if (pm.response.code === 429) {",
+                  "  console.log('Rate limit auth déclenché — 429 reçu');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5 — Accès directs bloqués",
+      "description": "Après la mise à jour docker-compose (suppression des ports 5001/5002), ces appels doivent échouer (connection refused)",
+      "item": [
+        {
+          "name": "GET auth-service direct :5001 — bloqué",
+          "request": {
+            "method": "GET",
+            "url": "http://localhost:5001/health",
+            "description": "Port 5001 non exposé → Connection refused"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Connection refused (port non exposé)', () => {",
+                  "  pm.expect(pm.response.code).to.not.eql(200);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET api-service direct :5002 — bloqué",
+          "request": {
+            "method": "GET",
+            "url": "http://localhost:5002/health",
+            "description": "Port 5002 non exposé → Connection refused"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Connection refused (port non exposé)', () => {",
+                  "  pm.expect(pm.response.code).to.not.eql(200);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

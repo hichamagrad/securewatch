@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────
+# Filebeat — Collecte des logs microservices
+# Lit les fichiers .log du volume partagé /logs
+# ─────────────────────────────────────────
+
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /logs/*.log
+    # Décodage JSON pour les logs structurés
+    json.keys_under_root: true
+    json.overwrite_keys: true
+    json.add_error_key: true
+    # Ajout de métadonnées
+    fields:
+      environment: local
+      project: pfa-microservices
+    fields_under_root: true
+    # Détection des nouvelles lignes
+    scan_frequency: 5s
+    close_inactive: 5m
+
+# Envoi vers Logstash pour traitement
+output.logstash:
+  hosts: ["logstash:5044"]
+
+# Logging Filebeat
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat
+  keepfiles: 7
+
+# Indicateurs de progression (registry)
+filebeat.registry.path: /usr/share/filebeat/data/registry

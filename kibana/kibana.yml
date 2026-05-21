@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────
+# kibana.yml — Configuration Kibana 8.12
+# PFA 2025-2026 : environnement local, sécurité ES désactivée
+# ─────────────────────────────────────────────────────────
+
+server.host: "0.0.0.0"
+server.name: "kibana-pfa"
+
+# Connexion à Elasticsearch (sans sécurité)
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+
+# Désactive l'assistant de configuration interactif (Kibana 8.x)
+xpack.security.enabled: false
+
+# Clé de chiffrement (obligatoire pour les saved objects)
+xpack.encryptedSavedObjects.encryptionKey: "pfa20252026securewatch32charskey!"
+
+# Désactiver la télémétrie
+telemetry.enabled: false
+telemetry.optIn: false
+
+# Logs minimaux
+logging.root.level: warn

@@ -1,0 +1,95 @@
+groups:
+
+  # ─────────────────────────────────────────
+  # SÉCURITÉ — Détection des incidents
+  # ─────────────────────────────────────────
+  - name: securewatch_security
+    interval: 30s
+    rules:
+
+      - alert: BruteForceDetected
+        expr: increase(brute_force_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "Attaque Brute Force détectée"
+          description: "Le compteur brute_force_total a augmenté dans les 5 dernières minutes."
+
+      - alert: HighAuthFailureRate
+        expr: rate(auth_failures_total[5m]) * 60 > 3
+        for: 2m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Taux d'échecs d'authentification élevé"
+          description: "Plus de 3 échecs auth/min depuis 2 minutes."
+
+      - alert: RateLimitViolations
+        expr: increase(flask_http_request_total{status="429"}[5m]) > 5
+        for: 0m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Dépassements de rate limit détectés"
+          description: "Plus de 5 requêtes bloquées (429) dans les 5 dernières minutes."
+
+      - alert: ForbiddenAccessSpike
+        expr: rate(flask_http_request_total{status="403"}[5m]) * 60 > 5
+        for: 2m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Pic d'accès interdits (403)"
+          description: "Plus de 5 accès interdits/min depuis 2 minutes."
+
+  # ─────────────────────────────────────────
+  # INFRASTRUCTURE — Santé des services
+  # ─────────────────────────────────────────
+  - name: securewatch_infrastructure
+    interval: 30s
+    rules:
+
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: infrastructure
+        annotations:
+          summary: "Service hors ligne : {{ $labels.job }}"
+          description: "{{ $labels.job }} ({{ $labels.instance }}) est injoignable depuis 1 minute."
+
+      - alert: HighCPUUsage
+        expr: (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+          category: infrastructure
+        annotations:
+          summary: "Utilisation CPU élevée"
+          description: "CPU au-dessus de 80% depuis 2 minutes (actuel : {{ $value | printf \"%.1f\" }}%)."
+
+      - alert: HighMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
+        for: 2m
+        labels:
+          severity: warning
+          category: infrastructure
+        annotations:
+          summary: "Utilisation mémoire élevée"
+          description: "RAM au-dessus de 85% depuis 2 minutes (actuel : {{ $value | printf \"%.1f\" }}%)."
+
+      - alert: HighErrorRate
+        expr: rate(flask_http_request_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          category: infrastructure
+        annotations:
+          summary: "Taux d'erreurs 5xx élevé — {{ $labels.service }}"
+          description: "Service {{ $labels.service }} génère plus de 0.1 erreur/s depuis 2 minutes."
