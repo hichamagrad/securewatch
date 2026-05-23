@@ -1,9 +1,6 @@
 """
 API Service — Microservice API principale
 PFA 2025-2026 : Centralisation des Logs pour la Détection d'Incidents de Sécurité
-
-Ce service expose des endpoints API et génère des logs de sécurité variés :
-accès autorisés, accès interdits (403), erreurs système (500), uploads suspects.
 """
 
 import os
@@ -13,6 +10,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_client import Counter
+import jwt
 
 app = Flask(__name__)
 
@@ -30,17 +28,27 @@ server_errors_total = Counter(
 SERVICE_NAME = os.environ.get('SERVICE_NAME', 'api-service')
 LOG_FILE = '/app/logs/api-service.log'
 
-# Données simulées
+# JWT — must match the secret used by auth-service
+JWT_SECRET = os.environ.get('JWT_SECRET', 'change-me-in-production-minimum-32chars!')
+JWT_ALGORITHM = 'HS256'
+
 USERS_DATA = [
-    {'id': 1, 'name': 'Alice Martin', 'role': 'admin', 'email': 'alice@pfa.local'},
-    {'id': 2, 'name': 'Bob Dupont', 'role': 'user', 'email': 'bob@pfa.local'},
-    {'id': 3, 'name': 'Carol Simon', 'role': 'operator', 'email': 'carol@pfa.local'},
-    {'id': 4, 'name': 'David Leroy', 'role': 'user', 'email': 'david@pfa.local'},
+    {'id': 1, 'name': 'Alice Martin',  'role': 'admin',    'email': 'alice@pfa.local'},
+    {'id': 2, 'name': 'Bob Dupont',    'role': 'user',     'email': 'bob@pfa.local'},
+    {'id': 3, 'name': 'Carol Simon',   'role': 'operator', 'email': 'carol@pfa.local'},
+    {'id': 4, 'name': 'David Leroy',   'role': 'user',     'email': 'david@pfa.local'},
+]
+
+SAFE_CONTENT_TYPES = [
+    'application/json',
+    'multipart/form-data',
+    'text/plain',
+    'application/pdf',
 ]
 
 
 def log_event(level: str, message: str, extra: dict = None):
-    """Écrit une entrée de log structurée en JSON."""
+    """Write a structured JSON log entry."""
     entry = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "level": level,
@@ -59,13 +67,25 @@ def log_event(level: str, message: str, extra: dict = None):
 
 
 def is_authorized(req) -> bool:
-    """Vérifie la présence d'un token Bearer dans l'en-tête Authorization."""
+    """Validate a signed JWT Bearer token (signature + expiry)."""
     auth = req.headers.get('Authorization', '')
-    return auth.startswith('Bearer ')
+    if not auth.startswith('Bearer '):
+        return False
+    token = auth[7:]
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return True
+    except jwt.PyJWTError:
+        return False
 
 
 def get_client_ip() -> str:
-    return request.headers.get('X-Forwarded-For', request.remote_addr)
+    """Return the real client IP.
+
+    X-Real-IP is set by nginx to $remote_addr and cannot be spoofed
+    through the gateway, unlike X-Forwarded-For.
+    """
+    return request.headers.get('X-Real-IP', request.remote_addr)
 
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
@@ -77,7 +97,6 @@ def health():
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
-    """Liste des utilisateurs — nécessite Authorization."""
     ip = get_client_ip()
     if not is_authorized(request):
         log_event('WARNING', '401 Unauthorized access to /api/users', {
@@ -97,7 +116,6 @@ def get_users():
 
 @app.route('/api/admin', methods=['GET'])
 def get_admin():
-    """Panel d'administration — toujours refusé (403) pour démonstration."""
     ip = get_client_ip()
     forbidden_access_total.labels(endpoint='/api/admin').inc()
     log_event('WARNING', '403 Forbidden — Unauthorized access to admin panel', {
@@ -110,7 +128,6 @@ def get_admin():
 
 @app.route('/api/config', methods=['GET'])
 def get_config():
-    """Configuration système — toujours refusé (403)."""
     ip = get_client_ip()
     forbidden_access_total.labels(endpoint='/api/config').inc()
     log_event('WARNING', '403 Forbidden — Access to /api/config denied', {
@@ -123,7 +140,6 @@ def get_config():
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
-    """Données métier — génère aléatoirement différentes réponses pour la démo."""
     ip = get_client_ip()
 
     if not is_authorized(request):
@@ -134,7 +150,6 @@ def get_data():
         })
         return jsonify({'error': 'Forbidden'}), 403
 
-    # 10 % de chance d'erreur serveur (simulation)
     if random.random() < 0.10:
         server_errors_total.labels(endpoint='/api/data').inc()
         log_event('ERROR', '500 Internal Server Error on /api/data', {
@@ -156,31 +171,41 @@ def get_data():
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
-    """Upload de fichier — flagge les types suspects."""
+    """File upload — requires Authorization; rejects suspicious content types."""
     ip = get_client_ip()
+
+    if not is_authorized(request):
+        log_event('WARNING', '401 Unauthorized — /api/upload', {
+            'ip': ip, 'endpoint': '/api/upload',
+            'method': 'POST', 'status': 401,
+            'event_type': 'unauthorized_access'
+        })
+        return jsonify({'error': 'Unauthorized — Bearer token required'}), 401
+
     content_type = request.content_type or 'unknown'
     content_length = request.content_length or 0
+    suspicious = not any(ct in content_type for ct in SAFE_CONTENT_TYPES)
 
-    SAFE_TYPES = ['application/json', 'multipart/form-data',
-                  'text/plain', 'application/pdf']
-    suspicious = not any(ct in content_type for ct in SAFE_TYPES)
+    if suspicious:
+        log_event('WARNING', f'POST /api/upload — suspicious content_type rejected: {content_type}', {
+            'ip': ip, 'endpoint': '/api/upload',
+            'method': 'POST', 'status': 415,
+            'content_type': content_type, 'content_length': content_length,
+            'event_type': 'suspicious_upload', 'suspicious': True
+        })
+        return jsonify({'error': 'Unsupported Media Type', 'suspicious': True}), 415
 
-    level = 'WARNING' if suspicious else 'INFO'
-    event_type = 'suspicious_upload' if suspicious else 'file_upload'
-
-    log_event(level, f'POST /api/upload — content_type={content_type}', {
+    log_event('INFO', f'POST /api/upload — content_type={content_type}', {
         'ip': ip, 'endpoint': '/api/upload',
         'method': 'POST', 'status': 200,
-        'content_type': content_type,
-        'content_length': content_length,
-        'event_type': event_type, 'suspicious': suspicious
+        'content_type': content_type, 'content_length': content_length,
+        'event_type': 'file_upload', 'suspicious': False
     })
-    return jsonify({'message': 'Upload received', 'suspicious': suspicious}), 200
+    return jsonify({'message': 'Upload received', 'suspicious': False}), 200
 
 
 @app.route('/api/reports', methods=['GET'])
 def get_reports():
-    """Rapports — accessible avec token."""
     ip = get_client_ip()
     if not is_authorized(request):
         log_event('WARNING', '401 Unauthorized — /api/reports', {

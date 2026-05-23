@@ -29,6 +29,16 @@ function setText(id, value) {
   if (el) el.textContent = value;
 }
 
+// Escape HTML special characters to prevent XSS when inserting into innerHTML
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 function formatTs(ts) {
   if (!ts) return '—';
   const d = new Date(ts);
@@ -37,13 +47,15 @@ function formatTs(ts) {
 }
 
 function levelBadge(level) {
-  const l = (level || 'INFO').toUpperCase();
-  return `<span class="badge badge-${l}">${l}</span>`;
+  const raw = (level || 'INFO').toUpperCase();
+  // Only allow uppercase letters in the CSS class name
+  const safeCss = raw.replace(/[^A-Z]/g, '');
+  return `<span class="badge badge-${safeCss}">${escapeHtml(raw)}</span>`;
 }
 
 function eventTag(type) {
   if (!type) return '';
-  return `<span class="event-tag">${type}</span>`;
+  return `<span class="event-tag">${escapeHtml(type)}</span>`;
 }
 
 // ── Navigation ────────────────────────────────────────────
@@ -290,9 +302,9 @@ function renderRecentLogs(logs) {
     <tr>
       <td>${formatTs(l.timestamp)}</td>
       <td>${levelBadge(l.level)}</td>
-      <td>${l.service || '—'}</td>
-      <td title="${(l.message || '').replace(/"/g, '&quot;')}">${l.message || '—'}</td>
-      <td>${l.ip || '—'}</td>
+      <td>${escapeHtml(l.service || '—')}</td>
+      <td title="${escapeHtml(l.message || '')}">${escapeHtml(l.message || '—')}</td>
+      <td>${escapeHtml(l.ip || '—')}</td>
     </tr>
   `).join('');
 }
@@ -325,9 +337,9 @@ function applyFilters() {
     <tr>
       <td>${formatTs(l.timestamp)}</td>
       <td>${levelBadge(l.level)}</td>
-      <td>${l.service || '—'}</td>
-      <td title="${(l.message||'').replace(/"/g,'&quot;')}">${l.message || '—'}</td>
-      <td>${l.ip || '—'}</td>
+      <td>${escapeHtml(l.service || '—')}</td>
+      <td title="${escapeHtml(l.message || '')}">${escapeHtml(l.message || '—')}</td>
+      <td>${escapeHtml(l.ip || '—')}</td>
       <td>${eventTag(l.event_type)}</td>
     </tr>
   `).join('');
@@ -428,19 +440,23 @@ function renderAlerts(alerts) {
     return;
   }
 
-  container.innerHTML = alerts.map(a => `
-    <div class="alert-card alert-card--${a.severity}">
-      <div class="alert-icon alert-icon--${a.severity}">${iconMap[a.severity]}</div>
+  container.innerHTML = alerts.map(a => {
+    // severity and type are generated from hardcoded strings in detectAlerts()
+    const sev     = (a.severity || '').replace(/[^a-z]/g, '');
+    const badgeCls = sev === 'critical' ? 'CRITICAL' : sev === 'high' ? 'ERROR' : 'WARNING';
+    return `
+    <div class="alert-card alert-card--${sev}">
+      <div class="alert-icon alert-icon--${sev}">${iconMap[sev] || ''}</div>
       <div class="alert-body">
         <div class="alert-title">
-          <span class="badge badge-${a.severity === 'critical' ? 'CRITICAL' : a.severity === 'high' ? 'ERROR' : 'WARNING'}">${a.type}</span>
-          &nbsp;${a.title}
+          <span class="badge badge-${badgeCls}">${escapeHtml(a.type)}</span>
+          &nbsp;${escapeHtml(a.title)}
         </div>
-        <div class="alert-desc">${a.desc}</div>
-        <div class="alert-meta">${a.meta}</div>
+        <div class="alert-desc">${escapeHtml(a.desc)}</div>
+        <div class="alert-meta">${escapeHtml(a.meta)}</div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 // ── Services Status ───────────────────────────────────────
@@ -488,15 +504,15 @@ async function updateServicesStatus(logs) {
 
     return `<div class="service-card">
       <div class="service-header">
-        <span class="service-name">${svc.name}</span>
+        <span class="service-name">${escapeHtml(svc.name)}</span>
         <div class="service-status">
           <div class="s-dot ${dotClass}"></div>
-          <span>${statusLabel}</span>
+          <span>${escapeHtml(statusLabel)}</span>
         </div>
       </div>
-      <div class="service-url">Port : ${svc.port}</div>
-      <div class="service-events">Rôle : ${svc.role}</div>
-      <div class="service-events">Événements 24h : ${count}</div>
+      <div class="service-url">Port : ${escapeHtml(String(svc.port))}</div>
+      <div class="service-events">Rôle : ${escapeHtml(svc.role)}</div>
+      <div class="service-events">Événements 24h : ${escapeHtml(String(count))}</div>
     </div>`;
   }).join('');
 }
@@ -823,6 +839,31 @@ async function refreshMonitoring() {
 
 // ── Init ──────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  // Navigation — replaces inline onclick attributes in index.html
+  ['dashboard', 'logs', 'alerts', 'services', 'monitoring'].forEach(name => {
+    const el = $(`nav-${name}`);
+    if (el) el.addEventListener('click', e => { e.preventDefault(); showSection(name); });
+  });
+
+  // "View all logs" button
+  const btnViewAll = $('btn-view-all-logs');
+  if (btnViewAll) btnViewAll.addEventListener('click', () => showSection('logs'));
+
+  // Log filters
+  const filterLevel   = $('filter-level');
+  const filterService = $('filter-service');
+  const filterSearch  = $('filter-search');
+  if (filterLevel)   filterLevel.addEventListener('change', applyFilters);
+  if (filterService) filterService.addEventListener('change', applyFilters);
+  if (filterSearch)  filterSearch.addEventListener('input', applyFilters);
+
+  // Monitoring tabs
+  const tabInfra     = $('tab-infra');
+  const tabSecurity  = $('tab-security');
+  if (tabInfra)    tabInfra.addEventListener('click',    () => switchMonTab('infra'));
+  if (tabSecurity) tabSecurity.addEventListener('click', () => switchMonTab('security'));
+
+  // Auto-refresh
   startClock();
   refresh();
   refreshTimer = setInterval(refresh, REFRESH_MS);

@@ -93,6 +93,10 @@ services:
       - ./logs:/app/logs
     environment:
       - SERVICE_NAME=auth-service
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production-minimum-32chars!}
+      - DEMO_ADMIN_PASSWORD=${DEMO_ADMIN_PASSWORD:-Admin@SecureWatch2026!}
+      - DEMO_USER1_PASSWORD=${DEMO_USER1_PASSWORD:-User1@PFA2026!}
+      - DEMO_OPERATOR_PASSWORD=${DEMO_OPERATOR_PASSWORD:-Operator@PFA2026!}
     networks:
       - elk
       - gateway-net
@@ -114,6 +118,7 @@ services:
       - ./logs:/app/logs
     environment:
       - SERVICE_NAME=api-service
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production-minimum-32chars!}
     networks:
       - elk
       - gateway-net

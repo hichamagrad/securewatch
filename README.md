@@ -12,13 +12,14 @@
 3. [Démarrage](#démarrage)
 4. [Interfaces web](#interfaces-web)
 5. [API Gateway HTTPS](#api-gateway-https)
-6. [Alertes Prometheus](#alertes-prometheus)
-7. [Comptes de test](#comptes-de-test)
-8. [Scénarios d'attaque](#scénarios-dattaque)
-9. [Analyse des logs](#analyse-des-logs)
-10. [Guide de simulation complète](#guide-de-simulation-complète)
-11. [Structure du projet](#structure-du-projet)
-12. [Dépannage](#dépannage)
+6. [Sécurité & Vulnérabilités corrigées](#sécurité--vulnérabilités-corrigées)
+7. [Alertes Prometheus](#alertes-prometheus)
+8. [Comptes de test](#comptes-de-test)
+9. [Scénarios d'attaque](#scénarios-dattaque)
+10. [Analyse des logs](#analyse-des-logs)
+11. [Guide de simulation complète](#guide-de-simulation-complète)
+12. [Structure du projet](#structure-du-projet)
+13. [Dépannage](#dépannage)
 
 ---
 
@@ -207,12 +208,74 @@ curl -v http://localhost:8080/auth/health
 # Login valide
 curl -k -X POST https://localhost:8443/auth/login `
   -H "Content-Type: application/json" `
-  -d '{"username":"admin","password":"password123"}'
+  -d '{"username":"admin","password":"Admin@SecureWatch2026!"}'
 
 # Login invalide → 401
 curl -k -X POST https://localhost:8443/auth/login `
   -H "Content-Type: application/json" `
   -d '{"username":"hacker","password":"wrong"}'
+```
+
+---
+
+## Sécurité & Vulnérabilités corrigées
+
+Un audit de sécurité complet a été réalisé sur le projet. Les 10 vulnérabilités identifiées ont été corrigées avant la livraison finale.
+
+### Tableau des vulnérabilités
+
+| # | Vulnérabilité | Sévérité | Fichier(s) concerné(s) | Correction appliquée |
+|---|---|:---:|---|---|
+| 1 | **Authentification JWT factice** — n'importe quelle valeur `Bearer xxx` donnait accès aux endpoints protégés | Critique | `api-service/app.py` | Validation réelle via `PyJWT.decode()` : signature HS256 + expiration vérifiées à chaque requête |
+| 2 | **Identifiants par défaut faibles** — mots de passe triviaux (`admin:admin`, `user1:user1`) codés en dur | Critique | `auth-service/app.py` | Mots de passe par défaut renforcés ; surchargeables via variables d'environnement `DEMO_*_PASSWORD` dans `.env` |
+| 3 | **Stored XSS via `innerHTML`** — données de logs insérées brutes dans le DOM ; un attaquant pouvant injecter un log avec `<script>` dans Elasticsearch déclenchait l'exécution dans tous les navigateurs connectés | Critique | `frontend/app.js` | Fonction `escapeHtml()` appliquée sur tous les champs issus des logs (`message`, `service`, `ip`, `event_type`) avant toute insertion `innerHTML` |
+| 4 | **Elasticsearch exposé sans authentification** — le proxy `/es/` redirigeait toutes les méthodes HTTP (DELETE, PUT…) vers Elasticsearch, permettant suppression d'index ou exfiltration complète | Élevée | `frontend/nginx.conf` | Liste blanche stricte : seuls `GET /_cluster/health` et `POST /security-logs*/_search` sont autorisés ; tout le reste retourne 403 |
+| 5 | **Usurpation d'IP contournant la détection brute force** — les services lisaient `X-Forwarded-For` fourni par le client, permettant de changer d'IP fictive à chaque tentative | Élevée | `auth-service/app.py`, `api-service/app.py` | Passage à `X-Real-IP`, positionné par nginx depuis `$remote_addr` (IP réelle de connexion, non modifiable par le client) |
+| 6 | **Prometheus exposé sans authentification** — l'API `/prometheus/` complète était accessible : énumération des cibles, de la configuration interne, des labels | Élevée | `frontend/nginx.conf` | Liste blanche stricte : seuls `/api/v1/query`, `/api/v1/query_range` et `/-/healthy` sont autorisés |
+| 7 | **Injection dans les logs** — le nom d'utilisateur était intégré brut dans les messages de log ; l'injection de `\n{"level":"CRITICAL",...}` créait de faux événements critiques | Moyenne | `auth-service/app.py` | Fonction `sanitize_input()` : suppression des caractères de contrôle ASCII (0x00–0x1F) et limitation à 64 caractères |
+| 8 | **Clé privée TLS dans le dépôt git** — `gateway/certs/selfsigned.key` était commité et donc accessible à quiconque ayant accès au repo | Moyenne | `.gitignore` | Vérifié que `gateway/certs/` est correctement ignoré par git dès l'origine ; les fichiers n'ont jamais été trackés |
+| 9 | **Upload non authentifié acceptant tout** — `/api/upload` répondait 200 OK sans token, quel que soit le contenu | Moyenne | `api-service/app.py` | Ajout d'une vérification JWT obligatoire ; les types MIME suspects retournent désormais **HTTP 415** au lieu de 200 |
+| 10 | **En-têtes de sécurité absents sur le frontend** — le serveur nginx du dashboard ne transmettait aucun en-tête de protection ; les handlers `onclick`/`onchange` inline dans le HTML empêchaient toute CSP stricte | Moyenne | `frontend/nginx.conf`, `frontend/index.html`, `frontend/app.js` | Ajout de `X-Frame-Options`, `X-Content-Type-Options`, `X-XSS-Protection`, `Referrer-Policy` et `Content-Security-Policy` (sans `unsafe-inline` pour les scripts — les handlers inline ont été déplacés vers `addEventListener` dans `app.js`) |
+
+### Architecture de sécurité après correction
+
+```
+Client
+  │
+  ├── JWT signé (HS256, 1h) ──► auth-service /login
+  │                                    │
+  │        ┌───────────────────────────┘
+  │        ▼
+  └── Bearer <token> ──► api-service (validation signature + expiration)
+                                │
+                         accès refusé si token invalide/expiré → 401
+
+Frontend (port 3000)
+  ├── CSP sans unsafe-inline (scripts)
+  ├── X-Frame-Options: DENY
+  ├── Proxy /es/  ──── ALLOWLIST ───► GET /_cluster/health
+  │                                   POST /security-logs*/_search seulement
+  └── Proxy /prom/ ── ALLOWLIST ───► GET /api/v1/query[_range] seulement
+
+auth-service / api-service
+  ├── IP réelle via X-Real-IP (non spoofable)
+  ├── Logs sanitisés (pas d'injection de contrôle)
+  └── JWT_SECRET via variable d'environnement (.env)
+```
+
+### Configurer le secret JWT (production)
+
+Le secret par défaut est un placeholder. Pour une mise en production :
+
+```powershell
+# Générer un secret fort
+python -c "import secrets; print(secrets.token_hex(32))"
+
+# Ajouter dans .env (déjà dans .gitignore)
+# JWT_SECRET=<valeur générée>
+
+# Relancer
+docker compose up --build -d
 ```
 
 ---
@@ -250,12 +313,13 @@ http://localhost:9093           → alertes actives dans Alertmanager
 
 ## Comptes de test
 
-| Utilisateur | Mot de passe | Rôle |
-|---|---|---|
-| `admin` | `password123` | Administrateur |
-| `user1` | `secret456` | Utilisateur |
-| `operator` | `ops789` | Opérateur |
-| `hicham` | `pfa2026` | Utilisateur |
+| Utilisateur | Mot de passe par défaut | Variable d'environnement | Rôle |
+|---|---|---|---|
+| `admin` | `Admin@SecureWatch2026!` | `DEMO_ADMIN_PASSWORD` | Administrateur |
+| `user1` | `User1@PFA2026!` | `DEMO_USER1_PASSWORD` | Utilisateur |
+| `operator` | `Operator@PFA2026!` | `DEMO_OPERATOR_PASSWORD` | Opérateur |
+
+Les mots de passe peuvent être surchargés sans rebuild via le fichier `.env` (voir section [Sécurité & Vulnérabilités corrigées](#sécurité--vulnérabilités-corrigées)).
 
 Tout autre couple → **HTTP 401** et log `auth_failure` dans ELK.
 
