@@ -13,13 +13,17 @@
 4. [Interfaces web](#interfaces-web)
 5. [API Gateway HTTPS](#api-gateway-https)
 6. [Sécurité & Vulnérabilités corrigées](#sécurité--vulnérabilités-corrigées)
-7. [Alertes Prometheus](#alertes-prometheus)
-8. [Comptes de test](#comptes-de-test)
-9. [Scénarios d'attaque](#scénarios-dattaque)
-10. [Analyse des logs](#analyse-des-logs)
-11. [Guide de simulation complète](#guide-de-simulation-complète)
-12. [Structure du projet](#structure-du-projet)
-13. [Dépannage](#dépannage)
+7. [Alertes Prometheus & Webhook Alertmanager](#alertes-prometheus--webhook-alertmanager)
+8. [Contrôle d'accès RBAC](#contrôle-daccès-rbac)
+9. [Fonctionnalités interactives](#fonctionnalités-interactives)
+10. [Temps réel — Server-Sent Events](#temps-réel--server-sent-events)
+11. [Comptes de test](#comptes-de-test)
+12. [Scénarios d'attaque](#scénarios-dattaque)
+13. [Analyse des logs](#analyse-des-logs)
+14. [Guide de simulation complète](#guide-de-simulation-complète)
+15. [Rapport & Screenshots](#rapport--screenshots)
+16. [Structure du projet](#structure-du-projet)
+17. [Dépannage](#dépannage)
 
 ---
 
@@ -76,6 +80,7 @@
 | **Grafana** | 3001 | Dashboards infrastructure & sécurité |
 | auth-service | — | Interne uniquement (via gateway) |
 | api-service | — | Interne uniquement (via gateway) |
+| **Redis** | — | Interne uniquement — compteurs brute force persistants |
 | node-exporter | — | Interne uniquement |
 | nginx-exporter | — | Interne uniquement |
 | filebeat | — | Interne uniquement |
@@ -280,7 +285,36 @@ docker compose up --build -d
 
 ---
 
-## Alertes Prometheus
+## Alertes Prometheus & Webhook Alertmanager
+
+### Webhook Alertmanager → api-service (actif)
+
+Toutes les alertes Prometheus sont désormais transmises à l'api-service via un webhook interne, sans configuration externe (email/Slack) requise.
+
+**Pipeline complet :**
+```
+Prometheus (règle FIRING)
+  → Alertmanager
+    → POST http://api-service:5002/api/alerts/webhook
+      → stockage en mémoire (max 100 alertes)
+        → GET /api/alerts/pushed (admin + operator uniquement)
+```
+
+**Endpoints ajoutés à l'api-service :**
+
+| Endpoint | Méthode | Auth | Description |
+|---|---|---|---|
+| `/api/alerts/webhook` | POST | Aucune (réseau interne) | Reçoit les notifications Alertmanager |
+| `/api/alerts/pushed` | GET | JWT (admin ou operator) | Retourne les alertes reçues (max 100) |
+
+Le receiver Alertmanager actif :
+```yaml
+receivers:
+  - name: 'securewatch-webhook'
+    webhook_configs:
+      - url: 'http://api-service:5002/api/alerts/webhook'
+        send_resolved: true
+```
 
 ### Règles configurées (`monitoring/alert_rules.yml`)
 
@@ -311,6 +345,108 @@ http://localhost:9093           → alertes actives dans Alertmanager
 
 ---
 
+## Fonctionnalités interactives
+
+### Sélecteur de fenêtre temporelle
+
+Un menu déroulant dans la barre supérieure (toujours visible) contrôle la plage de données chargée depuis Elasticsearch et l'échelle des graphiques.
+
+| Option | Granularité du graphique | Taille de lot ES |
+|---|---|---|
+| 1 heure | 12 × 5 min | 1 000 entrées |
+| 6 heures | 12 × 30 min | 1 000 entrées |
+| **24 heures** (défaut) | 12 × 2 h | 1 000 entrées |
+| 7 jours | 14 × 12 h | 1 000 entrées |
+
+Changer la plage déclenche un rechargement immédiat des logs, des compteurs et du graphique "Événements par Heure". Le sous-titre du graphique se met à jour dynamiquement.
+
+### Export CSV des logs
+
+Un bouton **⬇ CSV** dans la section "Flux de Logs" exporte les logs actuellement filtrés (niveau, service, recherche texte) au format RFC-4180. Le fichier est nommé `securewatch-logs-YYYY-MM-DD.csv` et contient jusqu'à 200 entrées.
+
+Champs exportés : `timestamp`, `level`, `service`, `message`, `ip`, `event_type`.
+
+### Acquittement des alertes
+
+Chaque carte d'alerte dans la section "Alertes de Sécurité" dispose d'un bouton **Ignorer** :
+
+- La décision est persistée dans `localStorage` sous la clé `sw-dismissed-alerts`
+- L'empreinte de l'alerte est `type|IP` — stable entre les rechargements
+- Le compteur de la barre latérale et le badge de section excluent les alertes ignorées
+- Un bouton **Réinitialiser** apparaît dans l'en-tête de la section dès qu'au moins une alerte est ignorée
+- Les alertes ignorées réapparaissent si la même IP lance une nouvelle attaque avec un fingerprint différent
+
+### Rétention automatique des logs (ILM Elasticsearch)
+
+Un conteneur init `es-setup` (`curlimages/curl`) s'exécute une fois au démarrage, après qu'Elasticsearch est `healthy`, et applique :
+
+1. **Politique ILM** `securewatch-14d` — phase `delete` à 14 jours
+2. **Index template** `securewatch-logs-template` — attaché à `security-logs-*`, 1 shard, 0 réplicas
+
+Après ce bootstrap, chaque nouvel index quotidien hérite automatiquement de la politique. Les indices de plus de 14 jours sont supprimés sans intervention manuelle.
+
+```powershell
+# Vérifier la politique appliquée
+Invoke-WebRequest "http://localhost:9200/_ilm/policy/securewatch-14d" -UseBasicParsing
+# Voir les indices et leur état ILM
+Invoke-WebRequest "http://localhost:9200/security-logs-*/_ilm/explain" -UseBasicParsing
+```
+
+---
+
+## Temps réel — Server-Sent Events
+
+Le dashboard bascule de la scrutation toutes les 8 secondes à un flux SSE pour les événements de sécurité critiques.
+
+### Architecture
+
+```
+auth-service (Flask)
+  │  push_sse({'type': 'brute_force', 'ip': ..., 'count': ...})
+  │  push_sse({'type': 'auth_failure', ...})
+  ▼
+/events/stream  (text/event-stream, X-Accel-Buffering: no)
+  │
+  ▼ proxy (frontend nginx — buffering off, timeout 3600s)
+  │
+  ▼
+EventSource('/auth/stream?token=<jwt>')  ← navigateur
+  │
+  ├─ auth_failure  → refresh() immédiat (mise à jour compteurs + logs)
+  └─ brute_force   → refresh() + toast violet "Brute force détecté — IP x.x.x.x"
+```
+
+### Comportement
+
+- **Connexion** : à la connexion (`startApp()`), le frontend ouvre une `EventSource` avec le JWT en paramètre (les en-têtes HTTP ne sont pas disponibles pour `EventSource`).
+- **Keepalive** : le serveur envoie un commentaire `: keepalive` toutes les 20 s pour maintenir la connexion à travers les proxies.
+- **Reconnexion** : si la connexion se coupe, le frontend tente de se reconnecter après 10 s si le token est encore valide.
+- **Déconnexion** : la fermeture de session (`logout`) ferme proprement l'`EventSource`.
+- **File de messages** : chaque client SSE a une file de 50 messages max. Les messages en excès pour un client lent sont abandonnés sans bloquer les autres.
+- **Polling conservé** : le polling toutes les 8 s reste actif pour les mises à jour générales (métriques Prometheus, état des services). SSE couvre uniquement les événements de sécurité urgents.
+
+### Redis — compteurs brute force persistants
+
+Avant Redis, `failed_attempts = defaultdict(int)` était en mémoire : un redémarrage du conteneur remettait tous les compteurs à zéro, permettant à un attaquant de contourner la détection.
+
+**Avec Redis (`redis:7-alpine`) :**
+
+| Opération | Commande Redis | Détail |
+|---|---|---|
+| Échec auth | `INCR bf:<ip>` + `EXPIRE bf:<ip> 3600` | Fenêtre glissante de 1 h |
+| Succès auth | `DEL bf:<ip>` | Réinitialise le compteur |
+| Redémarrage | — | Compteurs conservés dans Redis |
+
+```powershell
+# Inspecter les compteurs en direct
+docker exec redis redis-cli KEYS "bf:*"
+docker exec redis redis-cli GET "bf:10.0.0.5"
+```
+
+**Fallback** : si Redis est inaccessible au démarrage ou tombe en cours de route, `incr_failure()` et `reset_failure()` basculent silencieusement sur le `defaultdict` en mémoire. Le service ne s'arrête jamais à cause de Redis.
+
+---
+
 ## Comptes de test
 
 | Utilisateur | Mot de passe par défaut | Variable d'environnement | Rôle |
@@ -322,6 +458,55 @@ http://localhost:9093           → alertes actives dans Alertmanager
 Les mots de passe peuvent être surchargés sans rebuild via le fichier `.env` (voir section [Sécurité & Vulnérabilités corrigées](#sécurité--vulnérabilités-corrigées)).
 
 Tout autre couple → **HTTP 401** et log `auth_failure` dans ELK.
+
+---
+
+## Contrôle d'accès RBAC
+
+SecureWatch implémente un contrôle d'accès basé sur les rôles (RBAC) à deux niveaux : côté client (UI) et côté serveur (api-service).
+
+### Rôles et permissions
+
+| Section | admin | operator | user |
+|---|:---:|:---:|:---:|
+| Tableau de bord | ✓ | ✓ | ✓ |
+| Flux de Logs | ✓ | ✓ | ✓ |
+| Alertes de Sécurité | ✓ | ✓ | ✗ |
+| État des Services | ✓ | ✓ | ✗ |
+| Monitoring Prometheus | ✓ | ✗ | ✗ |
+| `/api/alerts/pushed` | ✓ | ✓ | ✗ |
+
+### Fonctionnement
+
+**1. Émission du rôle (auth-service)**
+
+À la connexion, `auth-service` intègre le rôle dans le JWT :
+```json
+{ "sub": "operator", "role": "operator", "iat": ..., "exp": ... }
+```
+Le frontend lit le claim `role` depuis le payload Base64 et le stocke dans `localStorage`.
+
+**2. Application côté frontend (app.js)**
+
+- `applyRoleRestrictions()` — appelée au démarrage, ajoute la classe `nav-restricted` sur les items de navigation inaccessibles et positionne `aria-disabled="true"`.
+- `showSection(name)` — bloque la navigation et affiche un toast `Accès refusé — Rôle <requis> requis` si le rôle courant n'est pas autorisé.
+- `canAccess(section)` — vérifie le rôle en mémoire avant toute navigation.
+
+**3. Application côté serveur (api-service)**
+
+L'endpoint `/api/alerts/pushed` valide le JWT **et** vérifie que le rôle est `admin` ou `operator` avant de retourner les données — les simples utilisateurs reçoivent HTTP 403.
+
+### Tester le RBAC
+
+```powershell
+# Générer les screenshots de chaque rôle (nécessite Playwright)
+pip install playwright
+playwright install chromium
+python scripts/screenshot_rbac.py
+# → rapport/screenshots/ui_review/rbac_admin_dashboard.png
+# → rapport/screenshots/ui_review/rbac_operator_dashboard.png
+# → rapport/screenshots/ui_review/rbac_user1_dashboard.png
+```
 
 ---
 
@@ -624,22 +809,89 @@ python scripts/generate_attacks.py --scenario all
 
 ---
 
+## Rapport & Screenshots
+
+Le rapport académique LaTeX et les captures d'écran pour la soutenance sont dans le dossier `rapport/`.
+
+### Contenu
+
+```
+rapport/
+├── rapport_securewatch.tex         # Source LaTeX du rapport (PFA 2025-2026)
+├── SCREENSHOTS_A_PRENDRE.md        # Guide de compilation et liste des figures
+└── screenshots/
+    ├── architecture_diagram.png
+    ├── dashboard_overview.png
+    ├── dashboard_logs.png
+    ├── dashboard_alertes.png
+    ├── dashboard_services.png
+    ├── dashboard_monitoring_infra.png
+    ├── dashboard_monitoring_security.png
+    ├── grafana_infra.png
+    ├── grafana_security.png
+    ├── kibana_discover.png
+    ├── prometheus_alerts.png
+    ├── prometheus_targets.png
+    ├── alertmanager_ui.png
+    ├── gateway_rate_limit.png
+    ├── rate_limit_terminal.png
+    ├── flux_donnees.png
+    └── ui_review/                  # Screenshots RBAC, thèmes, responsive
+        ├── rbac_admin_dashboard.png
+        ├── rbac_operator_dashboard.png
+        ├── rbac_user1_dashboard.png
+        └── ...
+```
+
+### Scripts de capture (Playwright)
+
+Tous les scripts nécessitent `pip install playwright && playwright install chromium` et que la stack soit démarrée (`docker-compose up -d`).
+
+| Script | Rôle |
+|---|---|
+| `scripts/take_screenshots.py` | Capture principale — toutes les sections du dashboard |
+| `scripts/take_screenshots_remaining.py` | Complète les captures manquantes |
+| `scripts/generate_missing_screenshots.py` | Détecte et génère les screenshots absents |
+| `scripts/screenshot_rbac.py` | Screenshots par rôle (admin / operator / user) |
+| `scripts/screenshot_auth.py` | Flux d'authentification (login, erreur, logout) |
+| `scripts/screenshot_ui.py` | Vues générales de l'interface |
+| `scripts/screenshot_themes.py` | Comparaison thème clair / sombre |
+| `scripts/screenshot_responsive.py` | Rendu mobile, tablette, desktop |
+| `scripts/take_alerts_screenshots.py` | États des alertes Prometheus / Alertmanager |
+| `scripts/take_kibana_screenshot.py` | Vue Kibana Discover avec index `security-logs-*` |
+| `scripts/functional_audit.py` | Audit fonctionnel automatisé — rapport PASS/FAIL |
+
+```powershell
+# Lancer l'audit fonctionnel complet
+python scripts/functional_audit.py
+
+# Capturer toutes les screenshots du rapport
+python scripts/take_screenshots.py
+python scripts/screenshot_rbac.py
+python scripts/screenshot_themes.py
+python scripts/screenshot_responsive.py
+```
+
+---
+
 ## Structure du projet
 
 ```
-pfa 20252026/
-├── docker-compose.yml              # 13 conteneurs, 3 réseaux isolés
+pfa 2025-2026/
+├── docker-compose.yml              # 16 conteneurs, 3 réseaux isolés
+│                                   # Inclut : Redis, es-setup (ILM), Logstash -Xms128m/-Xmx256m
+├── .env.example                    # Template des variables d'environnement
 │
 ├── gateway/
 │   ├── nginx.conf                  # HTTP→HTTPS redirect, rate limiting, logs JSON, proxy
 │   └── certs/
 │       ├── selfsigned.crt          # Certificat TLS (RSA 2048, 365 jours)
-│       └── selfsigned.key          # Clé privée
+│       └── selfsigned.key          # Clé privée (non commité)
 │
 ├── monitoring/
 │   ├── prometheus.yml              # Scrape configs (5 targets) + rule_files + alerting
 │   ├── alert_rules.yml             # 8 règles d'alertes (4 sécurité + 4 infrastructure)
-│   ├── alertmanager.yml            # Routage des alertes, inhibitions, receivers
+│   ├── alertmanager.yml            # Webhook actif → api-service:5002/api/alerts/webhook
 │   └── grafana/
 │       ├── provisioning/
 │       │   ├── datasources/prometheus.yml
@@ -650,23 +902,35 @@ pfa 20252026/
 │
 ├── services/
 │   ├── auth-service/
-│   │   ├── app.py                  # Flask : /login /logout /register /health /metrics
+│   │   ├── app.py                  # Flask : /login /logout /register /validate /health /metrics
+│   │   │                           # JWT HS256, brute force detection, sanitize_input()
+│   │   │                           # Redis : incr_failure / reset_failure (fallback mémoire)
+│   │   │                           # SSE  : /events/stream — push push_sse() sur auth_failure/brute_force
 │   │   │                           # Counters Prometheus : auth_failures_total, brute_force_total
 │   │   ├── Dockerfile
-│   │   └── requirements.txt
+│   │   └── requirements.txt        # + redis>=5.0.0
 │   ├── api-service/
 │   │   ├── app.py                  # Flask : /api/* /health /metrics
+│   │   │                           # Validation JWT réelle (PyJWT), RBAC server-side
+│   │   │                           # /api/alerts/webhook (Alertmanager) + /api/alerts/pushed
 │   │   │                           # Counters : forbidden_access_total, server_errors_total
 │   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   └── frontend/
-│       ├── index.html
-│       ├── style.css
-│       ├── app.js                  # Dashboard : ES queries, Prometheus panels, alertes, services
-│       ├── nginx.conf              # Proxies : /es/, /prometheus/, /grafana/, health checks
+│       ├── index.html              # SPA : login, nav RBAC, time-range select, btn-export-csv
+│       ├── style.css               # Thème dark/light, nav-restricted, access-toast, dismiss btn
+│       ├── app.js                  # RBAC (SECTION_ROLES, applyRoleRestrictions)
+│       │                           # SSE  : initSSE / closeSSE / showSecurityToast
+│       │                           # UX   : sélecteur plage, exportCSV, acquittement alertes
+│       │                           # ES queries, Prometheus panels, alertes, services status
+│       ├── nginx.conf              # Proxies allowlist : /es/, /prometheus/, health checks
+│       │                           # SSE  : /auth/stream (buffering off, timeout 3600s)
+│       │                           # En-têtes CSP, X-Frame-Options, X-Content-Type-Options
 │       └── Dockerfile
 │
-├── elasticsearch/elasticsearch.yml
+├── elasticsearch/
+│   ├── elasticsearch.yml
+│   └── ilm_setup.sh               # Bootstrap ILM policy securewatch-14d (14 jours)
 ├── kibana/kibana.yml
 ├── logstash/
 │   ├── logstash.yml
@@ -674,8 +938,25 @@ pfa 20252026/
 ├── filebeat/filebeat.yml          # Collecte /logs/*.log → Logstash
 │
 ├── scripts/
-│   ├── generate_attacks.py        # 6 scénarios (brute force, 403, rate-limit…)
-│   └── analyse_logs.py            # Rapport CLI depuis Elasticsearch
+│   ├── generate_attacks.py        # 6 scénarios d'attaque (brute force, 403, rate-limit…)
+│   ├── analyse_logs.py            # Rapport CLI depuis Elasticsearch
+│   ├── functional_audit.py        # Audit fonctionnel automatisé Playwright (PASS/FAIL)
+│   ├── take_screenshots.py        # Captures principales du dashboard
+│   ├── take_screenshots_remaining.py
+│   ├── generate_missing_screenshots.py
+│   ├── screenshot_rbac.py         # Captures par rôle (admin / operator / user)
+│   ├── screenshot_auth.py         # Flux d'authentification
+│   ├── screenshot_ui.py           # Vues générales de l'interface
+│   ├── screenshot_themes.py       # Thème clair vs sombre
+│   ├── screenshot_responsive.py   # Mobile / tablette / desktop
+│   ├── take_alerts_screenshots.py # États des alertes Prometheus
+│   ├── take_kibana_screenshot.py  # Vue Kibana Discover
+│   └── requirements.txt           # playwright, requests
+│
+├── rapport/
+│   ├── rapport_securewatch.tex    # Source LaTeX du rapport académique
+│   ├── SCREENSHOTS_A_PRENDRE.md  # Guide de compilation LaTeX + liste des figures
+│   └── screenshots/               # 16 captures pour le rapport + dossier ui_review/
 │
 └── logs/                          # Volume partagé : gateway + microservices → Filebeat
 ```
@@ -765,9 +1046,10 @@ Invoke-WebRequest "http://localhost:9200/security-logs-*/_search?size=5&sort=@ti
 | **Logstash** | 8.12.0 | Pipeline — parsing JSON, tagging sécurité, indexation |
 | **Filebeat** | 8.12.0 | Collecte des fichiers de logs → Logstash |
 | **Kibana** | 8.12.0 | Exploration et visualisation ELK |
-| **Python / Flask** | 3.11 / 3.0 | Microservices + métriques Prometheus |
+| **Python / Flask** | 3.11 / 3.0 | Microservices + métriques Prometheus + SSE stream |
+| **Redis** | 7 Alpine | Compteurs brute force persistants — INCR/EXPIRE/DEL |
 | **Chart.js** | 4.4.0 | Graphiques temps réel dans SecureWatch |
-| Docker Compose | Latest | Orchestration — 13 conteneurs, 3 réseaux |
+| Docker Compose | Latest | Orchestration — 16 conteneurs, 3 réseaux |
 
 ---
 

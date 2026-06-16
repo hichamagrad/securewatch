@@ -32,6 +32,9 @@ LOG_FILE = '/app/logs/api-service.log'
 JWT_SECRET = os.environ.get('JWT_SECRET', 'change-me-in-production-minimum-32chars!')
 JWT_ALGORITHM = 'HS256'
 
+# In-memory store for Alertmanager webhook notifications (max 100)
+_webhook_alerts = []
+
 USERS_DATA = [
     {'id': 1, 'name': 'Alice Martin',  'role': 'admin',    'email': 'alice@pfa.local'},
     {'id': 2, 'name': 'Bob Dupont',    'role': 'user',     'email': 'bob@pfa.local'},
@@ -66,17 +69,40 @@ def log_event(level: str, message: str, extra: dict = None):
         f.write(log_line + '\n')
 
 
-def is_authorized(req) -> bool:
-    """Validate a signed JWT Bearer token (signature + expiry)."""
+def _decode_jwt(req):
+    """Return decoded JWT payload or None."""
     auth = req.headers.get('Authorization', '')
     if not auth.startswith('Bearer '):
-        return False
-    token = auth[7:]
+        return None
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return True
+        return jwt.decode(auth[7:], JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except jwt.PyJWTError:
-        return False
+        return None
+
+
+def is_authorized(req) -> bool:
+    """Validate a signed JWT Bearer token (signature + expiry)."""
+    return _decode_jwt(req) is not None
+
+
+def get_role(req) -> str:
+    """Return the role claim from the JWT, or empty string if unauthenticated."""
+    payload = _decode_jwt(req)
+    return payload.get('role', 'user') if payload else ''
+
+
+def require_roles(req, allowed: list):
+    """Check JWT validity then role membership.
+
+    Returns (ok: bool, http_status: int).
+    Callers should return 401 if not is_authorized, 403 if wrong role.
+    """
+    payload = _decode_jwt(req)
+    if payload is None:
+        return False, 401
+    if payload.get('role', 'user') not in allowed:
+        return False, 403
+    return True, 200
 
 
 def get_client_ip() -> str:
@@ -97,19 +123,22 @@ def health():
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
+    """Admin + Operator only."""
     ip = get_client_ip()
-    if not is_authorized(request):
-        log_event('WARNING', '401 Unauthorized access to /api/users', {
-            'ip': ip, 'endpoint': '/api/users',
-            'method': 'GET', 'status': 401,
-            'event_type': 'unauthorized_access'
+    ok, code = require_roles(request, ['admin', 'operator'])
+    if not ok:
+        event = 'unauthorized_access' if code == 401 else 'forbidden_access'
+        log_event('WARNING', f'{code} — /api/users denied (role: {get_role(request)})', {
+            'ip': ip, 'endpoint': '/api/users', 'method': 'GET',
+            'status': code, 'event_type': event, 'role': get_role(request)
         })
-        return jsonify({'error': 'Unauthorized — Bearer token required'}), 401
+        msg = 'Unauthorized — Bearer token required' if code == 401 else 'Forbidden — Operator or Admin role required'
+        return jsonify({'error': msg}), code
 
     log_event('INFO', 'GET /api/users — 200 OK', {
-        'ip': ip, 'endpoint': '/api/users',
-        'method': 'GET', 'status': 200,
-        'event_type': 'api_access', 'records': len(USERS_DATA)
+        'ip': ip, 'endpoint': '/api/users', 'method': 'GET',
+        'status': 200, 'event_type': 'api_access',
+        'records': len(USERS_DATA), 'role': get_role(request)
     })
     return jsonify({'users': USERS_DATA, 'total': len(USERS_DATA)}), 200
 
@@ -140,15 +169,16 @@ def get_config():
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
+    """All authenticated roles (admin, operator, user)."""
     ip = get_client_ip()
 
     if not is_authorized(request):
-        log_event('WARNING', '403 Forbidden — Access to /api/data denied', {
+        log_event('WARNING', '401 Unauthorized — /api/data', {
             'ip': ip, 'endpoint': '/api/data',
-            'method': 'GET', 'status': 403,
-            'event_type': 'forbidden_access'
+            'method': 'GET', 'status': 401,
+            'event_type': 'unauthorized_access'
         })
-        return jsonify({'error': 'Forbidden'}), 403
+        return jsonify({'error': 'Unauthorized'}), 401
 
     if random.random() < 0.10:
         server_errors_total.labels(endpoint='/api/data').inc()
@@ -171,16 +201,18 @@ def get_data():
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
-    """File upload — requires Authorization; rejects suspicious content types."""
+    """Admin + Operator only — rejects suspicious content types."""
     ip = get_client_ip()
 
-    if not is_authorized(request):
-        log_event('WARNING', '401 Unauthorized — /api/upload', {
-            'ip': ip, 'endpoint': '/api/upload',
-            'method': 'POST', 'status': 401,
-            'event_type': 'unauthorized_access'
+    ok, code = require_roles(request, ['admin', 'operator'])
+    if not ok:
+        event = 'unauthorized_access' if code == 401 else 'forbidden_access'
+        log_event('WARNING', f'{code} — /api/upload denied (role: {get_role(request)})', {
+            'ip': ip, 'endpoint': '/api/upload', 'method': 'POST',
+            'status': code, 'event_type': event, 'role': get_role(request)
         })
-        return jsonify({'error': 'Unauthorized — Bearer token required'}), 401
+        msg = 'Unauthorized — Bearer token required' if code == 401 else 'Forbidden — Operator or Admin role required'
+        return jsonify({'error': msg}), code
 
     content_type = request.content_type or 'unknown'
     content_length = request.content_length or 0
@@ -206,14 +238,17 @@ def upload():
 
 @app.route('/api/reports', methods=['GET'])
 def get_reports():
+    """Admin + Operator only."""
     ip = get_client_ip()
-    if not is_authorized(request):
-        log_event('WARNING', '401 Unauthorized — /api/reports', {
-            'ip': ip, 'endpoint': '/api/reports',
-            'method': 'GET', 'status': 401,
-            'event_type': 'unauthorized_access'
+    ok, code = require_roles(request, ['admin', 'operator'])
+    if not ok:
+        event = 'unauthorized_access' if code == 401 else 'forbidden_access'
+        log_event('WARNING', f'{code} — /api/reports denied (role: {get_role(request)})', {
+            'ip': ip, 'endpoint': '/api/reports', 'method': 'GET',
+            'status': code, 'event_type': event, 'role': get_role(request)
         })
-        return jsonify({'error': 'Unauthorized'}), 401
+        msg = 'Unauthorized' if code == 401 else 'Forbidden — Operator or Admin role required'
+        return jsonify({'error': msg}), code
 
     log_event('INFO', 'GET /api/reports — 200 OK', {
         'ip': ip, 'endpoint': '/api/reports',
@@ -221,6 +256,47 @@ def get_reports():
         'event_type': 'api_access'
     })
     return jsonify({'reports': ['report_2026_05.pdf', 'report_2026_04.pdf']}), 200
+
+
+@app.route('/api/alerts/webhook', methods=['POST'])
+def alerts_webhook():
+    """Receives Alertmanager webhook POSTs — no auth required (internal network only)."""
+    data = request.get_json(silent=True) or {}
+    ip = get_client_ip()
+    incoming = data.get('alerts', [])
+
+    for alert in incoming:
+        _webhook_alerts.insert(0, {
+            'status':   alert.get('status', 'unknown'),
+            'name':     alert.get('labels', {}).get('alertname', ''),
+            'severity': alert.get('labels', {}).get('severity', 'info'),
+            'category': alert.get('labels', {}).get('category', ''),
+            'summary':  alert.get('annotations', {}).get('summary', ''),
+            'starts_at': alert.get('startsAt', ''),
+        })
+    _webhook_alerts[:] = _webhook_alerts[:100]
+
+    log_event('INFO', f'Alertmanager webhook: {len(incoming)} alert(s) received', {
+        'ip': ip, 'endpoint': '/api/alerts/webhook',
+        'event_type': 'alertmanager_webhook', 'count': len(incoming)
+    })
+    return jsonify({'received': len(incoming)}), 200
+
+
+@app.route('/api/alerts/pushed', methods=['GET'])
+def get_pushed_alerts():
+    """Admin + Operator only — returns Alertmanager webhook alerts."""
+    ip = get_client_ip()
+    ok, code = require_roles(request, ['admin', 'operator'])
+    if not ok:
+        event = 'unauthorized_access' if code == 401 else 'forbidden_access'
+        log_event('WARNING', f'{code} — /api/alerts/pushed denied (role: {get_role(request)})', {
+            'ip': ip, 'endpoint': '/api/alerts/pushed', 'method': 'GET',
+            'status': code, 'event_type': event, 'role': get_role(request)
+        })
+        msg = 'Unauthorized' if code == 401 else 'Forbidden — Operator or Admin role required'
+        return jsonify({'error': msg}), code
+    return jsonify({'alerts': _webhook_alerts}), 200
 
 
 @app.errorhandler(404)

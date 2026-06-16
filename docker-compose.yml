@@ -22,6 +22,23 @@ services:
       retries: 10
 
   # ─────────────────────────────────────────
+  # ES SETUP — ILM policy bootstrap (one-shot)
+  # Applies securewatch-14d policy to security-logs-* indices
+  # ─────────────────────────────────────────
+  es-setup:
+    image: curlimages/curl:latest
+    container_name: es-setup
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./elasticsearch/ilm_setup.sh:/ilm_setup.sh:ro
+    entrypoint: ["/bin/sh", "/ilm_setup.sh"]
+    networks:
+      - elk
+    restart: "no"
+
+  # ─────────────────────────────────────────
   # KIBANA — Visualisation
   # ─────────────────────────────────────────
   kibana:
@@ -57,7 +74,7 @@ services:
     networks:
       - elk
     environment:
-      - LS_JAVA_OPTS=-Xms256m -Xmx256m
+      - LS_JAVA_OPTS=-Xms128m -Xmx256m
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9600"]
       interval: 15s
@@ -83,6 +100,22 @@ services:
     command: filebeat -e --strict.perms=false
 
   # ─────────────────────────────────────────
+  # REDIS — Persistent brute-force counters (~10MB RAM)
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --maxmemory 32mb --maxmemory-policy allkeys-lru
+    networks:
+      - gateway-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ─────────────────────────────────────────
   # AUTH SERVICE — Microservice d'authentification
   # (accessible uniquement via la gateway — port 5001 non exposé)
   # ─────────────────────────────────────────
@@ -97,6 +130,11 @@ services:
       - DEMO_ADMIN_PASSWORD=${DEMO_ADMIN_PASSWORD:-Admin@SecureWatch2026!}
       - DEMO_USER1_PASSWORD=${DEMO_USER1_PASSWORD:-User1@PFA2026!}
       - DEMO_OPERATOR_PASSWORD=${DEMO_OPERATOR_PASSWORD:-Operator@PFA2026!}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - elk
       - gateway-net

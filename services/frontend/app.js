@@ -19,6 +19,8 @@ let timelineChart = null;
 let donutChart    = null;
 let refreshTimer  = null;
 let promCharts    = {};
+let currentRange  = '24h';
+let _sseSource    = null;
 
 // ── Utilitaires ──────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -58,10 +60,307 @@ function eventTag(type) {
   return `<span class="event-tag">${escapeHtml(type)}</span>`;
 }
 
+// ── Server-Sent Events ───────────────────────────────────────
+function showSecurityToast(ev) {
+  let toast = $('security-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'security-toast';
+    toast.className = 'access-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = `Brute force détecté — IP ${ev.ip} (${ev.count} tentatives)`;
+  toast.classList.add('visible');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => toast.classList.remove('visible'), 6000);
+}
+
+function initSSE() {
+  if (_sseSource) { _sseSource.close(); _sseSource = null; }
+  const token = getToken();
+  if (!token) return;
+
+  _sseSource = new EventSource('/auth/stream?token=' + encodeURIComponent(token));
+
+  _sseSource.onmessage = e => {
+    try {
+      const ev = JSON.parse(e.data);
+      if (ev.type === 'auth_failure' || ev.type === 'brute_force') {
+        refresh();
+      }
+      if (ev.type === 'brute_force') {
+        showSecurityToast(ev);
+      }
+    } catch {}
+  };
+
+  _sseSource.onerror = () => {
+    _sseSource.close();
+    _sseSource = null;
+    // Reconnect after 10 s if token is still valid
+    setTimeout(() => { if (isTokenValid()) initSSE(); }, 10000);
+  };
+}
+
+function closeSSE() {
+  if (_sseSource) { _sseSource.close(); _sseSource = null; }
+}
+
+// ── Time range helpers ────────────────────────────────────────
+function rangeLabel() {
+  return { '1h': '1 heure', '6h': '6 heures', '24h': '24 heures', '7d': '7 jours' }[currentRange] || '24 heures';
+}
+
+function rangeBuckets() {
+  const cfg = {
+    '1h':  { count: 12, ms: 5  * 60 * 1000,       fmt: { hour: '2-digit', minute: '2-digit' } },
+    '6h':  { count: 12, ms: 30 * 60 * 1000,        fmt: { hour: '2-digit', minute: '2-digit' } },
+    '24h': { count: 12, ms: 2  * 60 * 60 * 1000,   fmt: { hour: '2-digit', minute: '2-digit' } },
+    '7d':  { count: 14, ms: 12 * 60 * 60 * 1000,   fmt: { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' } },
+  };
+  return cfg[currentRange] || cfg['24h'];
+}
+
+// ── Animated counter — counts from current to new value ──────
+function animateValue(id, toNum) {
+  const el = $(id);
+  if (!el) return;
+  const from = parseInt(el.textContent.replace(/\D/g, '')) || 0;
+  if (from === toNum) { el.textContent = toNum.toLocaleString(); return; }
+  const dur = 700, t0 = performance.now();
+  (function tick(now) {
+    const p = Math.min((now - t0) / dur, 1);
+    const e = 1 - Math.pow(1 - p, 3); // ease-out cubic
+    el.textContent = Math.round(from + (toNum - from) * e).toLocaleString();
+    if (p < 1) requestAnimationFrame(tick);
+  })(t0);
+}
+
+// ── Auth ──────────────────────────────────────────────────
+function getToken()  { return localStorage.getItem('sw-token'); }
+function getUser()   { return localStorage.getItem('sw-user');  }
+function getRole()   { return localStorage.getItem('sw-role');  }
+
+function isTokenValid() {
+  const t = getToken();
+  if (!t) return false;
+  try {
+    const p = JSON.parse(atob(t.split('.')[1]));
+    return p.exp * 1000 > Date.now() + 5000;
+  } catch { return false; }
+}
+
+function authHeaders() {
+  const t = getToken();
+  return t ? { 'Authorization': 'Bearer ' + t } : {};
+}
+
+function updateSidebarUser() {
+  const user = getUser() || '?';
+  const role = getRole() || 'user';
+  setText('current-user', user);
+  const roleEl = $('current-role');
+  if (roleEl) { roleEl.textContent = role; roleEl.setAttribute('data-role', role); }
+  const av = $('user-avatar');
+  if (av) { av.textContent = user.charAt(0).toUpperCase(); av.setAttribute('data-role', role); }
+}
+
+function showLoginScreen() {
+  const s = $('login-screen');
+  if (s) s.classList.remove('hidden');
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+}
+
+function hideLoginScreen() {
+  const s = $('login-screen');
+  if (s) s.classList.add('hidden');
+}
+
+function handleUnauthorized() {
+  localStorage.removeItem('sw-token');
+  localStorage.removeItem('sw-user');
+  localStorage.removeItem('sw-role');
+  showLoginScreen();
+}
+
+async function doLogin(username, password) {
+  const res = await fetch('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Identifiants invalides');
+  localStorage.setItem('sw-token', data.token);
+  localStorage.setItem('sw-user', data.user || username);
+  try {
+    const p = JSON.parse(atob(data.token.split('.')[1]));
+    localStorage.setItem('sw-role', p.role || 'user');
+  } catch {}
+}
+
+function startApp() {
+  hideLoginScreen();
+  updateSidebarUser();
+  applyRoleRestrictions();
+  const logoutBtn = $('logout-btn');
+  if (logoutBtn) logoutBtn.onclick = () => { closeSSE(); handleUnauthorized(); };
+  initSSE();
+  refresh();
+  refreshTimer = setInterval(refresh, REFRESH_MS);
+}
+
+function initAuth() {
+  const form     = $('login-form');
+  const loginBtn = $('login-btn');
+  const errorEl  = $('login-error');
+
+  if (isTokenValid()) { startApp(); return; }
+
+  showLoginScreen();
+
+  if (form) {
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const user = ($('login-user').value || '').trim();
+      const pass  = $('login-pass').value || '';
+      if (!user || !pass) return;
+      loginBtn.disabled    = true;
+      loginBtn.textContent = 'Connexion…';
+      if (errorEl) errorEl.hidden = true;
+      try {
+        await doLogin(user, pass);
+        startApp();
+      } catch (err) {
+        if (errorEl) { errorEl.textContent = err.message; errorEl.hidden = false; }
+      } finally {
+        loginBtn.disabled    = false;
+        loginBtn.textContent = 'Se connecter';
+      }
+    });
+  }
+
+  // Quick-fill demo account buttons
+  document.querySelectorAll('.login-account-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ui = $('login-user'), pi = $('login-pass');
+      if (ui) ui.value = btn.dataset.user;
+      if (pi) { pi.value = btn.dataset.pass; pi.focus(); }
+    });
+  });
+}
+
+// ── Responsive Sidebar (hamburger) ───────────────────────
+function initHamburger() {
+  const btn      = $('hamburger');
+  const sidebar  = document.querySelector('.sidebar');
+  const backdrop = $('sidebar-backdrop');
+  if (!btn || !sidebar || !backdrop) return;
+
+  function openSidebar() {
+    sidebar.classList.add('open');
+    backdrop.classList.add('active');
+    btn.classList.add('active');
+    btn.setAttribute('aria-expanded', 'true');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeSidebar() {
+    sidebar.classList.remove('open');
+    backdrop.classList.remove('active');
+    btn.classList.remove('active');
+    btn.setAttribute('aria-expanded', 'false');
+    document.body.style.overflow = '';
+  }
+
+  btn.addEventListener('click', () =>
+    sidebar.classList.contains('open') ? closeSidebar() : openSidebar()
+  );
+  backdrop.addEventListener('click', closeSidebar);
+
+  // Close on nav click on mobile/tablet
+  document.querySelectorAll('.nav-item').forEach(el =>
+    el.addEventListener('click', () => { if (window.innerWidth <= 1024) closeSidebar(); })
+  );
+
+  // Close on Escape key
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && sidebar.classList.contains('open')) closeSidebar();
+  });
+}
+
+// ── Theme ─────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('sw-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+}
+
+function toggleTheme() {
+  const html = document.documentElement;
+  // Add transition class for smooth swap
+  html.classList.add('theme-transitioning');
+  const next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('sw-theme', next);
+  setTimeout(() => html.classList.remove('theme-transitioning'), 350);
+}
+
+// ── RBAC — Section permissions per role ──────────────────
+const SECTION_ROLES = {
+  dashboard:  ['admin', 'operator', 'user'],
+  logs:       ['admin', 'operator', 'user'],
+  alerts:     ['admin', 'operator'],
+  services:   ['admin', 'operator'],
+  monitoring: ['admin'],
+};
+
+function canAccess(section) {
+  const allowed = SECTION_ROLES[section] || ['admin'];
+  return allowed.includes(getRole() || 'user');
+}
+
+function showAccessDenied(section) {
+  const required = (SECTION_ROLES[section] || ['admin'])[0];
+  const labels   = { admin: 'Administrateur', operator: 'Opérateur', user: 'Utilisateur' };
+  let toast = $('access-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'access-toast';
+    toast.className = 'access-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = `Accès refusé — Rôle ${labels[required] || required} requis`;
+  toast.classList.add('visible');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => toast.classList.remove('visible'), 3000);
+}
+
+function applyRoleRestrictions() {
+  Object.entries(SECTION_ROLES).forEach(([section, allowed]) => {
+    const nav = $(`nav-${section}`);
+    if (!nav) return;
+    if (!allowed.includes(getRole() || 'user')) {
+      nav.classList.add('nav-restricted');
+      nav.setAttribute('aria-disabled', 'true');
+      nav.setAttribute('title', `Accès restreint — rôle requis : ${allowed[0]}`);
+    } else {
+      nav.classList.remove('nav-restricted');
+      nav.removeAttribute('aria-disabled');
+      nav.removeAttribute('title');
+    }
+  });
+}
+
 // ── Navigation ────────────────────────────────────────────
 let monitoringInitialized = false;
 
 function showSection(name) {
+  // Role-based access check
+  if (!canAccess(name)) {
+    showAccessDenied(name);
+    return;
+  }
+
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   $(`section-${name}`).classList.add('active');
@@ -101,7 +400,7 @@ async function fetchLogs(size = 500) {
     query: {
       bool: {
         must: [
-          { range: { '@timestamp': { gte: 'now-24h' } } }
+          { range: { '@timestamp': { gte: 'now-' + currentRange } } }
         ],
         must_not: [
           { terms: { 'event_type.keyword': ['health_check', 'service_start'] } }
@@ -115,9 +414,10 @@ async function fetchLogs(size = 500) {
   try {
     const res = await fetch(`${ES_BASE}/${INDEX}/_search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(body)
     });
+    if (res.status === 401) { handleUnauthorized(); return null; }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return (data.hits?.hits || []).map(h => h._source);
@@ -128,7 +428,8 @@ async function fetchLogs(size = 500) {
 
 async function checkES() {
   try {
-    const res = await fetch(`${ES_BASE}/_cluster/health`);
+    const res = await fetch(`${ES_BASE}/_cluster/health`, { headers: authHeaders() });
+    if (res.status === 401) { handleUnauthorized(); return false; }
     const ok  = res.ok;
     $('es-dot').className  = 'status-dot ' + (ok ? 'connected' : 'error');
     $('es-status-text').textContent = ok ? 'Elasticsearch OK' : 'ES Non connecté';
@@ -148,11 +449,11 @@ function updateStats(logs) {
   const errors   = logs.filter(l => l.level === 'ERROR' || l.status === 500).length;
   const brute    = logs.filter(l => l.event_type === 'brute_force').length;
 
-  $('stat-total').textContent     = total.toLocaleString();
-  $('stat-auth').textContent      = authFail.toLocaleString();
-  $('stat-forbidden').textContent = forbidden.toLocaleString();
-  $('stat-errors').textContent    = errors.toLocaleString();
-  $('stat-brute').textContent     = brute.toLocaleString();
+  animateValue('stat-total',     total);
+  animateValue('stat-auth',      authFail);
+  animateValue('stat-forbidden', forbidden);
+  animateValue('stat-errors',    errors);
+  animateValue('stat-brute',     brute);
 
   // Alert badge
   const alertCount = brute + (authFail >= 5 ? 1 : 0) + (forbidden >= 10 ? 1 : 0);
@@ -162,12 +463,12 @@ function updateStats(logs) {
 
 // ── Charts ────────────────────────────────────────────────
 function buildTimeline(logs) {
-  // Bucket by hour for the last 12 hours
+  const { count, ms, fmt } = rangeBuckets();
   const now = Date.now();
-  const buckets = Array.from({ length: 12 }, (_, i) => {
-    const start = now - (11 - i) * 3600000;
-    const end   = start + 3600000;
-    const label = new Date(start).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  const buckets = Array.from({ length: count }, (_, i) => {
+    const start = now - (count - 1 - i) * ms;
+    const end   = start + ms;
+    const label = new Date(start).toLocaleString('fr-FR', fmt);
     return { label, start, end, total: 0, warn: 0, err: 0 };
   });
 
@@ -184,6 +485,9 @@ function buildTimeline(logs) {
   const totals  = buckets.map(b => b.total);
   const warns   = buckets.map(b => b.warn);
   const errs    = buckets.map(b => b.err);
+
+  const sub = $('timeline-subtitle');
+  if (sub) sub.textContent = 'Dernières ' + rangeLabel();
 
   if (timelineChart) {
     timelineChart.data.labels           = labels;
@@ -203,8 +507,8 @@ function buildTimeline(logs) {
         {
           label: 'Total',
           data: totals,
-          borderColor: '#00d4ff',
-          backgroundColor: 'rgba(0,212,255,0.08)',
+          borderColor: '#8b5cf6',
+          backgroundColor: 'rgba(139,92,246,0.1)',
           fill: true,
           tension: 0.4,
           pointRadius: 3,
@@ -213,7 +517,7 @@ function buildTimeline(logs) {
         {
           label: 'WARNING',
           data: warns,
-          borderColor: '#ff9f43',
+          borderColor: '#f97316',
           backgroundColor: 'transparent',
           tension: 0.4,
           pointRadius: 2,
@@ -223,7 +527,7 @@ function buildTimeline(logs) {
         {
           label: 'ERROR/CRITICAL',
           data: errs,
-          borderColor: '#ff4757',
+          borderColor: '#f43f5e',
           backgroundColor: 'transparent',
           tension: 0.4,
           pointRadius: 2,
@@ -258,7 +562,7 @@ function buildDonut(logs) {
 
   const labels = Object.keys(types).filter(k => types[k] > 0);
   const data   = labels.map(k => types[k]);
-  const colors = ['#ff9f43','#ff4757','#ff6b7a','#ffd32a','#2ed573','#7a8aac'];
+  const colors = ['#f97316','#f43f5e','#f43f5e','#f59e0b','#10b981','#8b5cf6'];
 
   if (donutChart) {
     donutChart.data.labels           = labels;
@@ -345,6 +649,24 @@ function applyFilters() {
   `).join('');
 }
 
+// ── CSV Export ────────────────────────────────────────────
+function exportCSV() {
+  const fields = ['timestamp', 'level', 'service', 'message', 'ip', 'event_type'];
+  const rows = filteredLogs.slice(0, 200).map(l =>
+    fields.map(f => `"${String(l[f] || '').replace(/"/g, '""')}"`).join(',')
+  );
+  const csv = [fields.join(','), ...rows].join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `securewatch-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // ── Alerts ────────────────────────────────────────────────
 function detectAlerts(logs) {
   const alerts = [];
@@ -424,7 +746,43 @@ function detectAlerts(logs) {
   renderAlerts(alerts);
 }
 
+// ── Alert acknowledgement (localStorage) ─────────────────
+const DISMISSED_KEY = 'sw-dismissed-alerts';
+
+function getDismissed() {
+  try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+
+function alertFingerprint(a) {
+  const m = a.meta.match(/(?:IP|Service):\s*([^\s·,]+)/);
+  return `${a.type}|${m ? m[1] : a.meta.slice(0, 40)}`;
+}
+
+function dismissAlert(fp) {
+  const s = getDismissed();
+  s.add(fp);
+  localStorage.setItem(DISMISSED_KEY, JSON.stringify([...s]));
+  detectAlerts(allLogs);
+}
+
 function renderAlerts(alerts) {
+  const dismissed = getDismissed();
+  const visible   = alerts.filter(a => !dismissed.has(alertFingerprint(a)));
+
+  // Update nav badge and section header count
+  $('alert-badge').textContent = visible.length;
+  const dismissedCount = dismissed.size;
+  const suffix = dismissedCount > 0
+    ? ` (${dismissedCount} ignorée${dismissedCount !== 1 ? 's' : ''})`
+    : '';
+  $('alert-count-badge').textContent =
+    `${visible.length} alerte${visible.length !== 1 ? 's' : ''}${suffix}`;
+
+  // Show/hide the "reset dismissed" button
+  const btnClear = $('btn-clear-dismissed');
+  if (btnClear) btnClear.hidden = dismissedCount === 0;
+
   const container = $('alerts-container');
   const iconMap = {
     critical: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
@@ -432,18 +790,18 @@ function renderAlerts(alerts) {
     medium:   `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/></svg>`
   };
 
-  if (!alerts.length) {
+  if (!visible.length) {
     container.innerHTML = `<div class="alert-empty">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
-      <p>Aucune alerte active détectée pour les dernières 24h.</p>
+      <p>Aucune alerte active${dismissedCount > 0 ? ` — ${dismissedCount} ignorée${dismissedCount !== 1 ? 's' : ''}` : ''}.</p>
     </div>`;
     return;
   }
 
-  container.innerHTML = alerts.map(a => {
-    // severity and type are generated from hardcoded strings in detectAlerts()
-    const sev     = (a.severity || '').replace(/[^a-z]/g, '');
+  container.innerHTML = visible.map(a => {
+    const sev      = (a.severity || '').replace(/[^a-z]/g, '');
     const badgeCls = sev === 'critical' ? 'CRITICAL' : sev === 'high' ? 'ERROR' : 'WARNING';
+    const fp       = escapeHtml(alertFingerprint(a));
     return `
     <div class="alert-card alert-card--${sev}">
       <div class="alert-icon alert-icon--${sev}">${iconMap[sev] || ''}</div>
@@ -455,8 +813,13 @@ function renderAlerts(alerts) {
         <div class="alert-desc">${escapeHtml(a.desc)}</div>
         <div class="alert-meta">${escapeHtml(a.meta)}</div>
       </div>
+      <button class="alert-dismiss-btn" data-fp="${fp}" title="Ignorer cette alerte">Ignorer</button>
     </div>`;
   }).join('');
+
+  container.querySelectorAll('.alert-dismiss-btn').forEach(btn => {
+    btn.addEventListener('click', () => dismissAlert(btn.dataset.fp));
+  });
 }
 
 // ── Services Status ───────────────────────────────────────
@@ -688,7 +1051,7 @@ async function refreshInfra() {
     const { labels, data } = rangeToPoints(cpuRange);
     upsertChart('chart-cpu', labels, [{
       label: 'CPU %', data,
-      borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.08)',
+      borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.1)',
       fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2
     }], { max: 100, ticks: { callback: v => v + '%', color: '#7a8aac', font: { size: 9 } } });
   }
@@ -701,7 +1064,7 @@ async function refreshInfra() {
     const { labels, data } = rangeToPoints(ramRange);
     upsertChart('chart-ram', labels, [{
       label: 'RAM GB', data,
-      borderColor: '#2ed573', backgroundColor: 'rgba(46,213,115,0.08)',
+      borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)',
       fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2
     }]);
   }
@@ -717,12 +1080,12 @@ async function refreshInfra() {
   upsertChart('chart-rps', rpsLabels, [
     {
       label: 'auth-service', data: authPts.data,
-      borderColor: '#00d4ff', backgroundColor: 'transparent',
+      borderColor: '#8b5cf6', backgroundColor: 'transparent',
       fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2
     },
     {
       label: 'api-service', data: apiPts.data,
-      borderColor: '#2ed573', backgroundColor: 'transparent',
+      borderColor: '#10b981', backgroundColor: 'transparent',
       fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2
     }
   ]);
@@ -742,9 +1105,10 @@ async function fetchES429Total() {
       size: 0
     };
     const res = await fetch(`${ES_BASE}/${INDEX}/_search`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(body)
     });
+    if (res.status === 401) { handleUnauthorized(); return null; }
     const data = await res.json();
     return data.hits?.total?.value ?? null;
   } catch { return null; }
@@ -763,9 +1127,10 @@ async function fetchES429Range() {
       aggs: { per_minute: { date_histogram: { field: '@timestamp', fixed_interval: '1m' } } }
     };
     const res = await fetch(`${ES_BASE}/${INDEX}/_search`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(body)
     });
+    if (res.status === 401) { handleUnauthorized(); return { labels: [], data: [] }; }
     const data = await res.json();
     const buckets = data.aggregations?.per_minute?.buckets || [];
     return {
@@ -793,7 +1158,7 @@ async function refreshSecurity() {
   const authFailPts = rangeToPoints(authFailRange);
   upsertChart('chart-auth-fail', authFailPts.labels, [{
     label: 'Auth Failures', data: authFailPts.data,
-    borderColor: '#ff9f43', backgroundColor: 'rgba(255,159,67,0.1)',
+    borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.1)',
     fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2
   }]);
   const lastAuth = authFailPts.data.at(-1) ?? null;
@@ -802,7 +1167,7 @@ async function refreshSecurity() {
   // 429 rate-limit chart (source: Elasticsearch gateway logs)
   upsertChart('chart-429', ratePts.labels, [{
     label: '429 Rate Limited', data: ratePts.data,
-    borderColor: '#ff4757', backgroundColor: 'rgba(255,71,87,0.1)',
+    borderColor: '#f43f5e', backgroundColor: 'rgba(244,63,94,0.1)',
     fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2
   }]);
   const last429 = ratePts.data.length ? ratePts.data.at(-1) : null;
@@ -815,12 +1180,12 @@ async function refreshSecurity() {
   upsertChart('chart-security-combo', comboLabels, [
     {
       label: '403', data: f403Pts.data,
-      borderColor: '#ff4757', backgroundColor: 'transparent',
+      borderColor: '#f43f5e', backgroundColor: 'transparent',
       fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2
     },
     {
       label: 'Auth Failures', data: authFailPts.data,
-      borderColor: '#ff9f43', backgroundColor: 'transparent',
+      borderColor: '#f97316', backgroundColor: 'transparent',
       fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2
     }
   ]);
@@ -839,17 +1204,25 @@ async function refreshMonitoring() {
 
 // ── Init ──────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Navigation — replaces inline onclick attributes in index.html
+  // Responsive sidebar
+  initHamburger();
+
+  // Theme
+  initTheme();
+  const themeBtn = $('theme-toggle');
+  if (themeBtn) themeBtn.addEventListener('click', toggleTheme);
+
+  // Clock runs always (safe, no API calls)
+  startClock();
+
+  // UI events (safe, no API calls)
   ['dashboard', 'logs', 'alerts', 'services', 'monitoring'].forEach(name => {
     const el = $(`nav-${name}`);
     if (el) el.addEventListener('click', e => { e.preventDefault(); showSection(name); });
   });
-
-  // "View all logs" button
   const btnViewAll = $('btn-view-all-logs');
   if (btnViewAll) btnViewAll.addEventListener('click', () => showSection('logs'));
 
-  // Log filters
   const filterLevel   = $('filter-level');
   const filterService = $('filter-service');
   const filterSearch  = $('filter-search');
@@ -857,15 +1230,29 @@ document.addEventListener('DOMContentLoaded', () => {
   if (filterService) filterService.addEventListener('change', applyFilters);
   if (filterSearch)  filterSearch.addEventListener('input', applyFilters);
 
-  // Monitoring tabs
-  const tabInfra     = $('tab-infra');
-  const tabSecurity  = $('tab-security');
-  if (tabInfra)    tabInfra.addEventListener('click',    () => switchMonTab('infra'));
+  const tabInfra    = $('tab-infra');
+  const tabSecurity = $('tab-security');
+  if (tabInfra)    tabInfra.addEventListener('click', () => switchMonTab('infra'));
   if (tabSecurity) tabSecurity.addEventListener('click', () => switchMonTab('security'));
 
-  // Auto-refresh
-  startClock();
-  refresh();
-  refreshTimer = setInterval(refresh, REFRESH_MS);
-  // Monitoring charts are lazy-initialized on first visit (see showSection)
+  // Time range selector
+  const timeRangeEl = $('time-range');
+  if (timeRangeEl) timeRangeEl.addEventListener('change', () => {
+    currentRange = timeRangeEl.value;
+    refresh();
+  });
+
+  // CSV export
+  const btnExport = $('btn-export-csv');
+  if (btnExport) btnExport.addEventListener('click', exportCSV);
+
+  // Clear dismissed alerts
+  const btnClearDismissed = $('btn-clear-dismissed');
+  if (btnClearDismissed) btnClearDismissed.addEventListener('click', () => {
+    localStorage.removeItem(DISMISSED_KEY);
+    detectAlerts(allLogs);
+  });
+
+  // Auth — shows login screen or starts the dashboard (must be last)
+  initAuth();
 });
