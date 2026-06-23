@@ -13,14 +13,29 @@ const REFRESH_MS = 8000;
 const PROM_MS    = 15000;
 const PROM_RANGE = 30;   // minutes of history for charts
 
+// ── Geo country registry ─────────────────────────────────
+const GEO_COUNTRY_DATA = {
+  RU:  { name: 'Russie',         num: 643, lat: 61.52, lon: 105.32, risk: 'high'     },
+  CN:  { name: 'Chine',          num: 156, lat: 35.86, lon: 104.19, risk: 'high'     },
+  KP:  { name: 'Corée du Nord',  num: 408, lat: 40.34, lon: 127.51, risk: 'critical' },
+  IR:  { name: 'Iran',           num: 364, lat: 32.42, lon:  53.68, risk: 'high'     },
+  NG:  { name: 'Nigeria',        num: 566, lat:  9.08, lon:   8.67, risk: 'medium'   },
+  TOR: { name: 'Tor Exit Node',  num: null, lat: null, lon:  null,  risk: 'critical' },
+};
+
 // ── State ────────────────────────────────────────────────
-let allLogs       = [];
-let timelineChart = null;
-let donutChart    = null;
-let refreshTimer  = null;
-let promCharts    = {};
-let currentRange  = '24h';
-let _sseSource    = null;
+let allLogs          = [];
+let _totalEventCount = 0;   // real ES total (not capped by fetch size)
+let _geoInited   = false;
+let _geoSvg      = null;
+let _geoProj     = null;
+let _geoPathFn   = null;
+let timelineChart    = null;
+let donutChart       = null;
+let refreshTimer     = null;
+let promCharts       = {};
+let currentRange     = '24h';
+let _sseSource       = null;
 
 // ── Utilitaires ──────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -62,6 +77,14 @@ function eventTag(type) {
 
 // ── Server-Sent Events ───────────────────────────────────────
 function showSecurityToast(ev) {
+  const messages = {
+    brute_force:   `Brute force — IP ${ev.ip} (${ev.count} tentatives)`,
+    sqli_attempt:  `Injection SQL — IP ${ev.ip} : ${String(ev.payload || '').slice(0, 40)}`,
+    suspicious_ua: `Scanner détecté — IP ${ev.ip} : ${String(ev.user_agent || '').slice(0, 40)}`,
+  };
+  const msg = messages[ev.type];
+  if (!msg) return;
+
   let toast = $('security-toast');
   if (!toast) {
     toast = document.createElement('div');
@@ -69,7 +92,7 @@ function showSecurityToast(ev) {
     toast.className = 'access-toast';
     document.body.appendChild(toast);
   }
-  toast.textContent = `Brute force détecté — IP ${ev.ip} (${ev.count} tentatives)`;
+  toast.textContent = msg;
   toast.classList.add('visible');
   clearTimeout(toast._t);
   toast._t = setTimeout(() => toast.classList.remove('visible'), 6000);
@@ -85,12 +108,10 @@ function initSSE() {
   _sseSource.onmessage = e => {
     try {
       const ev = JSON.parse(e.data);
-      if (ev.type === 'auth_failure' || ev.type === 'brute_force') {
+      if (['auth_failure', 'brute_force', 'sqli_attempt', 'suspicious_ua'].includes(ev.type)) {
         refresh();
       }
-      if (ev.type === 'brute_force') {
-        showSecurityToast(ev);
-      }
+      showSecurityToast(ev);
     } catch {}
   };
 
@@ -310,6 +331,7 @@ const SECTION_ROLES = {
   dashboard:  ['admin', 'operator', 'user'],
   logs:       ['admin', 'operator', 'user'],
   alerts:     ['admin', 'operator'],
+  geomap:     ['admin', 'operator'],
   services:   ['admin', 'operator'],
   monitoring: ['admin'],
 };
@@ -369,21 +391,24 @@ function showSection(name) {
     dashboard:  'Tableau de bord',
     logs:       'Flux de Logs',
     alerts:     'Alertes de Sécurité',
+    geomap:     'Carte des Attaques Géographiques',
     services:   'État des Services',
     monitoring: 'Monitoring — Métriques Prometheus'
   };
   $('page-title').textContent = titles[name] || name;
 
-  // Lazy-init: charts need the section visible to measure canvas size
   if (name === 'monitoring') {
     if (!monitoringInitialized) {
       monitoringInitialized = true;
       refreshMonitoring();
       setInterval(refreshMonitoring, PROM_MS);
     } else {
-      // Resize charts in case the viewport changed while section was hidden
       Object.values(promCharts).forEach(c => c.resize());
     }
+  }
+
+  if (name === 'geomap') {
+    initGeoMap().then(() => refreshGeoMap(allLogs));
   }
 }
 
@@ -403,7 +428,7 @@ async function fetchLogs(size = 500) {
           { range: { '@timestamp': { gte: 'now-' + currentRange } } }
         ],
         must_not: [
-          { terms: { 'event_type.keyword': ['health_check', 'service_start'] } }
+          { terms: { 'event_type.keyword': ['health_check', 'service_start', 'gateway_request'] } }
         ]
       }
     },
@@ -420,6 +445,7 @@ async function fetchLogs(size = 500) {
     if (res.status === 401) { handleUnauthorized(); return null; }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    _totalEventCount = data.hits?.total?.value ?? 0;
     return (data.hits?.hits || []).map(h => h._source);
   } catch (e) {
     return null;
@@ -443,7 +469,7 @@ async function checkES() {
 
 // ── Stats ─────────────────────────────────────────────────
 function updateStats(logs) {
-  const total    = logs.length;
+  const total    = _totalEventCount || logs.length;
   const authFail = logs.filter(l => l.event_type === 'auth_failure').length;
   const forbidden= logs.filter(l => l.event_type === 'forbidden_access' || l.status === 403).length;
   const errors   = logs.filter(l => l.level === 'ERROR' || l.status === 500).length;
@@ -454,11 +480,6 @@ function updateStats(logs) {
   animateValue('stat-forbidden', forbidden);
   animateValue('stat-errors',    errors);
   animateValue('stat-brute',     brute);
-
-  // Alert badge
-  const alertCount = brute + (authFail >= 5 ? 1 : 0) + (forbidden >= 10 ? 1 : 0);
-  $('alert-badge').textContent    = alertCount;
-  $('alert-count-badge').textContent = `${alertCount} alerte${alertCount !== 1 ? 's' : ''}`;
 }
 
 // ── Charts ────────────────────────────────────────────────
@@ -551,22 +572,26 @@ function buildTimeline(logs) {
 }
 
 function buildDonut(logs) {
-  const types = {
-    'Auth Failure':  logs.filter(l => l.event_type === 'auth_failure').length,
-    'Forbidden':     logs.filter(l => l.event_type === 'forbidden_access').length,
-    'Brute Force':   logs.filter(l => l.event_type === 'brute_force').length,
-    'Server Error':  logs.filter(l => l.event_type === 'server_error').length,
-    'API Access':    logs.filter(l => l.event_type === 'api_access').length,
-    'Autres':        logs.filter(l => !l.event_type).length,
+  const typeMap = {
+    'Auth Failure':  { filter: l => l.event_type === 'auth_failure',    color: '#f97316' },
+    'Forbidden':     { filter: l => l.event_type === 'forbidden_access', color: '#ef4444' },
+    'Brute Force':   { filter: l => l.event_type === 'brute_force',      color: '#dc2626' },
+    'SQL Injection': { filter: l => l.event_type === 'sqli_attempt',     color: '#f43f5e' },
+    'Scanner':       { filter: l => l.event_type === 'suspicious_ua',    color: '#a855f7' },
+    'Geo Anomaly':   { filter: l => l.event_type === 'geo_anomaly',      color: '#0ea5e9' },
+    'Server Error':  { filter: l => l.event_type === 'server_error',     color: '#f59e0b' },
+    'API Access':    { filter: l => l.event_type === 'api_access',       color: '#10b981' },
+    'Autres':        { filter: l => !l.event_type,                       color: '#8b5cf6' },
   };
 
-  const labels = Object.keys(types).filter(k => types[k] > 0);
-  const data   = labels.map(k => types[k]);
-  const colors = ['#f97316','#f43f5e','#f43f5e','#f59e0b','#10b981','#8b5cf6'];
+  const labels = Object.keys(typeMap).filter(k => logs.filter(typeMap[k].filter).length > 0);
+  const data   = labels.map(k => logs.filter(typeMap[k].filter).length);
+  const colors = labels.map(k => typeMap[k].color);
 
   if (donutChart) {
-    donutChart.data.labels           = labels;
-    donutChart.data.datasets[0].data = data;
+    donutChart.data.labels                        = labels;
+    donutChart.data.datasets[0].data              = data;
+    donutChart.data.datasets[0].backgroundColor   = colors;
     donutChart.update('none');
     return;
   }
@@ -743,6 +768,45 @@ function detectAlerts(logs) {
     }
   });
 
+  // SQL injection attempts — any occurrence is critical
+  const sqliLogs = logs.filter(l => l.event_type === 'sqli_attempt');
+  if (sqliLogs.length > 0) {
+    const ips = [...new Set(sqliLogs.map(l => (l.ip || 'unknown').split(',')[0].trim()))];
+    alerts.push({
+      type: 'SQL INJECTION',
+      severity: 'critical',
+      title: 'Tentative d\'injection SQL détectée',
+      desc: `${sqliLogs.length} tentative${sqliLogs.length !== 1 ? 's' : ''} d'injection SQL détectée${sqliLogs.length !== 1 ? 's' : ''} sur /auth/login`,
+      meta: `Événements: ${sqliLogs.length} · IP${ips.length > 1 ? 's' : ''}: ${ips.slice(0, 3).join(', ')}`
+    });
+  }
+
+  // Scanner / offensive tool — any occurrence warrants an alert
+  const scannerLogs = logs.filter(l => l.event_type === 'suspicious_ua');
+  if (scannerLogs.length > 0) {
+    const ips = [...new Set(scannerLogs.map(l => (l.ip || 'unknown').split(',')[0].trim()))];
+    alerts.push({
+      type: 'SCANNER DÉTECTÉ',
+      severity: 'high',
+      title: 'Outil de scan offensif détecté',
+      desc: `${scannerLogs.length} requête${scannerLogs.length !== 1 ? 's' : ''} avec un user-agent d'outil offensif (sqlmap, nikto, gobuster…)`,
+      meta: `Requêtes: ${scannerLogs.length} · IP${ips.length > 1 ? 's' : ''}: ${ips.slice(0, 3).join(', ')}`
+    });
+  }
+
+  // Geographic anomaly — any occurrence warrants an alert
+  const geoLogs = logs.filter(l => l.event_type === 'geo_anomaly');
+  if (geoLogs.length > 0) {
+    const countries = [...new Set(geoLogs.map(l => l.country_name || l.country_code || '?'))];
+    alerts.push({
+      type: 'ANOMALIE GÉO',
+      severity: 'high',
+      title: 'Anomalie géographique détectée',
+      desc: `${geoLogs.length} requête${geoLogs.length !== 1 ? 's' : ''} provenant de pays à risque élevé`,
+      meta: `Requêtes: ${geoLogs.length} · Pays: ${countries.slice(0, 3).join(', ')}`
+    });
+  }
+
   renderAlerts(alerts);
 }
 
@@ -755,8 +819,9 @@ function getDismissed() {
 }
 
 function alertFingerprint(a) {
-  const m = a.meta.match(/(?:IP|Service):\s*([^\s·,]+)/);
-  return `${a.type}|${m ? m[1] : a.meta.slice(0, 40)}`;
+  // Match IP:, IPs:, Service:, or Pays: to extract a stable identifier
+  const m = a.meta.match(/(?:IPs?|Service|Pays):\s*([^\s·,]+)/);
+  return `${a.type}|${m ? m[1] : a.type}`;
 }
 
 function dismissAlert(fp) {
@@ -831,6 +896,7 @@ const SERVICES = [
   { name: 'Auth Service',   check: '/auth-health',                port: '—',    role: 'Authentification (interne via gateway)' },
   { name: 'API Service',    check: '/api-health',                 port: '—',    role: 'API principale (interne via gateway)' },
   { name: 'API Gateway',    check: '/gateway-health',             port: '8080', role: 'Point d\'entrée unique — rate limiting' },
+  { name: 'Redis',          check: null,                          port: '6379', role: 'Persistance compteurs brute-force & alertes webhook' },
   { name: 'Prometheus',     check: '/prometheus/-/healthy',       port: '9090', role: 'Collecte des métriques temps réel' },
   { name: 'Grafana',        check: '/grafana-health',             port: '3001', role: 'Dashboards de visualisation' },
   { name: 'Node Exporter',  check: '/node-exporter-health',       port: '9100', role: 'Métriques système hôte (CPU, RAM)' },
@@ -840,7 +906,7 @@ const SERVICES = [
 async function pingService(url) {
   if (!url) return null;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    const res = await fetch(url, { headers: authHeaders(), signal: AbortSignal.timeout(3000) });
     return res.ok;
   } catch {
     return false;
@@ -901,6 +967,7 @@ async function refresh() {
   renderFullLogs(logs);
   detectAlerts(logs);
   updateServicesStatus(logs);
+  if ($('section-geomap')?.classList.contains('active')) refreshGeoMap(logs);
 }
 
 // ── Demo Data (quand ES n'est pas encore démarré) ─────────
@@ -915,6 +982,9 @@ function loadDemoData() {
     { level: 'ERROR',    event: 'server_error',     msg: '500 Internal Server Error on /api/data', ip: '172.18.0.3' },
     { level: 'CRITICAL', event: 'brute_force',      msg: 'BRUTE FORCE ATTACK detected from IP 10.0.0.5', ip: '10.0.0.5' },
     { level: 'INFO',     event: 'api_access',       msg: 'GET /api/users — 200 OK', ip: '172.18.0.1' },
+    { level: 'WARNING',  event: 'sqli_attempt',     msg: 'SQL injection attempt detected from 185.220.101.1', ip: '185.220.101.1' },
+    { level: 'WARNING',  event: 'suspicious_ua',    msg: 'Scanner/offensive tool detected: sqlmap/1.7.8', ip: '192.168.1.55' },
+    { level: 'WARNING',  event: 'geo_anomaly',      msg: 'Geographic anomaly: request from Russia (RU) via 195.154.1.1', ip: '172.18.0.1', country_name: 'Russia', country_code: 'RU' },
   ];
 
   for (let i = 0; i < 80; i++) {
@@ -1142,16 +1212,23 @@ async function fetchES429Range() {
 
 // ── Monitoring Refresh — Security ─────────────────────────
 async function refreshSecurity() {
-  const [authFailRange, f403Range,
+  const [authFailRange, f403Range, sqliRange, scannerRange, geoRange,
          bruteTotal, total403, total500,
-         total429, ratePts] = await Promise.all([
+         total429, ratePts,
+         sqliTotal, scannerTotal, geoTotal] = await Promise.all([
     fetchPromRange('sum(increase(auth_failures_total[1m]))'),
     fetchPromRange('sum(increase(flask_http_request_total{status="403"}[1m]))'),
-    fetchPromInstant('sum(brute_force_total)'),
-    fetchPromInstant('sum(flask_http_request_total{status="403"})'),
-    fetchPromInstant('sum(flask_http_request_total{status="500"})'),
+    fetchPromRange('sum(increase(sqli_attempts_total[1m]))'),
+    fetchPromRange('sum(increase(scanner_ua_total[1m]))'),
+    fetchPromRange('sum(increase(geo_anomaly_total[1m]))'),
+    fetchPromInstant('sum(brute_force_total) or vector(0)'),
+    fetchPromInstant('sum(flask_http_request_total{status="403"}) or vector(0)'),
+    fetchPromInstant('sum(flask_http_request_total{status="500"}) or vector(0)'),
     fetchES429Total(),
-    fetchES429Range()
+    fetchES429Range(),
+    fetchPromInstant('sum(sqli_attempts_total) or vector(0)'),
+    fetchPromInstant('sum(scanner_ua_total) or vector(0)'),
+    fetchPromInstant('sum(geo_anomaly_total) or vector(0)'),
   ]);
 
   // Auth failures chart
@@ -1190,16 +1267,195 @@ async function refreshSecurity() {
     }
   ]);
 
-  setText('prom-brute-total', bruteTotal !== null ? Math.round(bruteTotal) : '—');
-  setText('prom-403-total',   total403   !== null ? Math.round(total403)   : '—');
-  setText('prom-500-total',   total500   !== null ? Math.round(total500)   : '—');
-  setText('prom-429-total',   total429   !== null ? total429 : '—');
+  // Advanced threats chart: SQLi + Scanner + Geo
+  const sqliPts    = rangeToPoints(sqliRange);
+  const scannerPts = rangeToPoints(scannerRange);
+  const geoPts     = rangeToPoints(geoRange);
+  const threatLabels = [sqliPts, scannerPts, geoPts, authFailPts]
+    .reduce((best, cur) => cur.labels.length > best.labels.length ? cur : best).labels;
+  upsertChart('chart-threats', threatLabels, [
+    {
+      label: 'SQL Injection', data: sqliPts.data,
+      borderColor: '#f43f5e', backgroundColor: 'transparent',
+      fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2
+    },
+    {
+      label: 'Scanner UA', data: scannerPts.data,
+      borderColor: '#a855f7', backgroundColor: 'transparent',
+      fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2
+    },
+    {
+      label: 'Anomalie Géo', data: geoPts.data,
+      borderColor: '#0ea5e9', backgroundColor: 'transparent',
+      fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2
+    }
+  ]);
+
+  // Stat cards — show 0 instead of — when metric is simply absent
+  setText('prom-brute-total',   bruteTotal    !== null ? Math.round(bruteTotal)    : '0');
+  setText('prom-sqli-total',    sqliTotal     !== null ? Math.round(sqliTotal)     : '0');
+  setText('prom-scanner-total', scannerTotal  !== null ? Math.round(scannerTotal)  : '0');
+  setText('prom-geo-total',     geoTotal      !== null ? Math.round(geoTotal)      : '0');
+  setText('prom-403-total',     total403      !== null ? Math.round(total403)      : '0');
+  setText('prom-500-total',     total500      !== null ? Math.round(total500)      : '0');
+  setText('prom-429-total',     total429      !== null ? total429                  : '0');
 }
 
 async function refreshMonitoring() {
   await Promise.all([refreshInfra(), refreshSecurity()]);
   const now = new Date().toLocaleTimeString('fr-FR', { hour12: false });
   $('prom-last-update').textContent = `Mis à jour : ${now}`;
+}
+
+// ── Geo Map ───────────────────────────────────────────────
+async function initGeoMap() {
+  if (_geoInited) return;
+  const container = $('geo-map-container');
+  if (!container) return;
+
+  try {
+    const res = await fetch('/world-110m.json');
+    if (!res.ok) throw new Error('map data unavailable');
+    const world = await res.json();
+
+    const W = container.clientWidth || 860;
+    const H = Math.round(W * 0.52);
+
+    _geoProj = d3.geoNaturalEarth1()
+      .scale(W / 6.3)
+      .translate([W / 2, H / 2]);
+    _geoPathFn = d3.geoPath().projection(_geoProj);
+
+    _geoSvg = d3.select('#geo-map-container')
+      .append('svg')
+      .attr('width', '100%')
+      .attr('viewBox', `0 0 ${W} ${H}`)
+      .attr('preserveAspectRatio', 'xMidYMid meet');
+
+    // Sphere background
+    _geoSvg.append('path')
+      .datum({ type: 'Sphere' })
+      .attr('class', 'geo-sphere')
+      .attr('d', _geoPathFn);
+
+    // Graticule grid
+    _geoSvg.append('path')
+      .datum(d3.geoGraticule()())
+      .attr('class', 'geo-graticule')
+      .attr('d', _geoPathFn);
+
+    // Country fills
+    const countries = topojson.feature(world, world.objects.countries);
+    _geoSvg.append('g').attr('class', 'geo-countries')
+      .selectAll('path')
+      .data(countries.features)
+      .enter().append('path')
+      .attr('class', 'geo-country')
+      .attr('data-id', d => d.id)
+      .attr('d', _geoPathFn);
+
+    // Country borders
+    _geoSvg.append('path')
+      .datum(topojson.mesh(world, world.objects.countries, (a, b) => a !== b))
+      .attr('class', 'geo-borders')
+      .attr('d', _geoPathFn);
+
+    // Markers group (drawn on top)
+    _geoSvg.append('g').attr('class', 'geo-markers');
+
+    const loading = $('geo-loading');
+    if (loading) loading.remove();
+    _geoInited = true;
+  } catch (e) {
+    const loading = $('geo-loading');
+    if (loading) loading.textContent = 'Erreur de chargement de la carte.';
+  }
+}
+
+function refreshGeoMap(logs) {
+  if (!_geoInited || !_geoSvg) return;
+
+  // Aggregate event counts per country code
+  const counts = {};
+  logs.filter(l => l.event_type === 'geo_anomaly').forEach(l => {
+    const code = l.country_code || 'UNK';
+    counts[code] = (counts[code] || 0) + 1;
+  });
+
+  const total = Object.values(counts).reduce((s, n) => s + n, 0);
+  setText('geo-event-count',
+    total === 0 ? 'Aucune anomalie détectée'
+                : `${total} anomalie${total > 1 ? 's' : ''} géographique${total > 1 ? 's' : ''}`);
+
+  // Build sets of numeric IDs per risk level
+  const numByCss = { critical: new Set(), high: new Set() };
+  Object.keys(counts).forEach(code => {
+    const info = GEO_COUNTRY_DATA[code];
+    if (!info?.num) return;
+    if (info.risk === 'critical') numByCss.critical.add(info.num);
+    else if (info.risk === 'high' || info.risk === 'medium') numByCss.high.add(info.num);
+  });
+
+  // Highlight country paths
+  _geoSvg.selectAll('.geo-country')
+    .classed('geo-country--critical', d => numByCss.critical.has(+d.id))
+    .classed('geo-country--high',     d => numByCss.high.has(+d.id));
+
+  // Redraw pulse markers
+  const markersG = _geoSvg.select('.geo-markers');
+  markersG.selectAll('*').remove();
+
+  let markerIdx = 0;
+  Object.entries(counts).forEach(([code, count]) => {
+    const info = GEO_COUNTRY_DATA[code];
+    if (!info || info.lat === null) return;
+
+    const [x, y] = _geoProj([info.lon, info.lat]);
+    if (x == null || y == null || isNaN(x) || isNaN(y)) return;
+
+    const color = info.risk === 'critical' ? 'var(--red)' : info.risk === 'high' ? 'var(--orange)' : 'var(--yellow)';
+    const r     = Math.min(5 + count * 2, 16);
+    const delay = (markerIdx++ * 0.4) + 's';
+
+    // Outer pulse ring
+    markersG.append('circle')
+      .attr('class', 'geo-pulse')
+      .attr('cx', x).attr('cy', y).attr('r', r)
+      .style('stroke', color)
+      .style('animation-delay', delay);
+
+    // Inner solid dot
+    markersG.append('circle')
+      .attr('class', 'geo-dot')
+      .attr('cx', x).attr('cy', y).attr('r', r * 0.42)
+      .style('fill', color)
+      .append('title')
+      .text(`${info.name} — ${count} événement${count > 1 ? 's' : ''}`);
+  });
+
+  updateGeoTable(counts);
+}
+
+function updateGeoTable(counts) {
+  const tbody = $('geo-table-body');
+  if (!tbody) return;
+
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="log-empty">Aucune anomalie géographique détectée</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = entries.map(([code, count]) => {
+    const info = GEO_COUNTRY_DATA[code] || { name: code, risk: 'medium' };
+    const cls  = info.risk === 'critical' ? 'CRITICAL' : info.risk === 'high' ? 'ERROR' : 'WARNING';
+    return `<tr>
+      <td><span class="badge badge-${cls}">${escapeHtml(code)}</span></td>
+      <td>${escapeHtml(info.name)}</td>
+      <td><strong>${count}</strong></td>
+      <td><span class="badge badge-${cls}">${escapeHtml(info.risk.toUpperCase())}</span></td>
+    </tr>`;
+  }).join('');
 }
 
 // ── Init ──────────────────────────────────────────────────
@@ -1216,7 +1472,7 @@ document.addEventListener('DOMContentLoaded', () => {
   startClock();
 
   // UI events (safe, no API calls)
-  ['dashboard', 'logs', 'alerts', 'services', 'monitoring'].forEach(name => {
+  ['dashboard', 'logs', 'alerts', 'geomap', 'services', 'monitoring'].forEach(name => {
     const el = $(`nav-${name}`);
     if (el) el.addEventListener('click', e => { e.preventDefault(); showSection(name); });
   });

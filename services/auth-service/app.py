@@ -30,9 +30,29 @@ auth_failures_total = Counter(
 brute_force_total = Counter(
     'brute_force_total', 'Brute force attacks detected', ['ip']
 )
+sqli_attempts_total = Counter(
+    'sqli_attempts_total', 'Total SQL injection attempts detected'
+)
+scanner_ua_total = Counter(
+    'scanner_ua_total', 'Total scanner/offensive tool detections'
+)
 
 SERVICE_NAME = os.environ.get('SERVICE_NAME', 'auth-service')
 LOG_FILE = '/app/logs/auth-service.log'
+
+# ── Security detection patterns ───────────────────────────────
+SQLI_PATTERNS = re.compile(
+    r"('|\"|--|;|/\*|\*/|UNION\s|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|DROP\s|"
+    r"SLEEP\s*\(|BENCHMARK\s*\(|EXEC\s*\(|CAST\s*\(|CONVERT\s*\(|"
+    r"OR\s+\d+=\d+|AND\s+\d+=\d+|OR\s+'[^']*'='[^']*'|0x[0-9a-fA-F]{4,})",
+    re.IGNORECASE,
+)
+
+SCANNER_UAS = re.compile(
+    r"(sqlmap|nikto|nessus|masscan|nmap\s|zgrab|openvas|dirbuster|"
+    r"nuclei|gobuster|ffuf|wfuzz|burpsuite|acunetix|w3af|arachni)",
+    re.IGNORECASE,
+)
 
 # JWT — secret must be set via environment variable in production
 JWT_SECRET = os.environ.get('JWT_SECRET', 'change-me-in-production-minimum-32chars!')
@@ -102,17 +122,14 @@ _sse_clients: list = []
 _sse_lock = threading.Lock()
 
 def push_sse(data: dict):
-    """Push a JSON event to all active SSE clients; prune disconnected ones."""
+    """Push a JSON event to all active SSE clients."""
     msg = 'data: ' + json.dumps(data) + '\n\n'
     with _sse_lock:
-        alive = []
-        for q in _sse_clients:
+        for q in list(_sse_clients):
             try:
                 q.put_nowait(msg)
-                alive.append(q)
             except queue.Full:
-                pass  # slow client — drop silently, it will reconnect
-        _sse_clients[:] = alive
+                pass  # slow client — drop this message, keep the client
 
 VALID_USERS = {
     'admin':    os.environ.get('DEMO_ADMIN_PASSWORD',    'Admin@SecureWatch2026!'),
@@ -152,6 +169,26 @@ def log_event(level: str, message: str, extra: dict = None):
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(log_line + '\n')
+
+
+# ─── Security middleware ────────────────────────────────────────────────────────
+
+@app.before_request
+def detect_scanner():
+    ua = request.headers.get('User-Agent', '')
+    if ua and SCANNER_UAS.search(ua):
+        ip = get_client_ip()
+        safe_ua = re.sub(r'[\x00-\x1f\x7f]', '', ua)[:200]
+        log_event('WARNING', f'Scanner/offensive tool detected from {ip}: {safe_ua[:80]}', {
+            'ip': ip, 'endpoint': request.path, 'method': request.method,
+            'event_type': 'suspicious_ua', 'user_agent': safe_ua,
+        })
+        scanner_ua_total.inc()
+        push_sse({
+            'type': 'suspicious_ua', 'ip': ip,
+            'user_agent': safe_ua[:80],
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+        })
 
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
@@ -215,6 +252,20 @@ def login():
     client_ip = get_client_ip()
 
     time.sleep(random.uniform(0.05, 0.2))
+
+    # SQL injection detection
+    if SQLI_PATTERNS.search(username):
+        log_event('WARNING', f'SQL injection attempt detected from {client_ip}', {
+            'ip': client_ip, 'endpoint': '/login', 'status': 400,
+            'event_type': 'sqli_attempt', 'payload': username[:100],
+        })
+        sqli_attempts_total.inc()
+        push_sse({
+            'type': 'sqli_attempt', 'ip': client_ip,
+            'payload': username[:80],
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+        })
+        return jsonify({'error': 'Invalid input'}), 400
 
     if VALID_USERS.get(username) == password:
         reset_failure(client_ip)

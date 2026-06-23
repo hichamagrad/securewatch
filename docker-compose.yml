@@ -157,6 +157,11 @@ services:
     environment:
       - SERVICE_NAME=api-service
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production-minimum-32chars!}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - elk
       - gateway-net
@@ -262,7 +267,7 @@ services:
     ports:
       - "3001:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_SECURITY_ALLOW_EMBEDDING=true

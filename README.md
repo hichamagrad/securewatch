@@ -16,14 +16,15 @@
 7. [Alertes Prometheus & Webhook Alertmanager](#alertes-prometheus--webhook-alertmanager)
 8. [Contrôle d'accès RBAC](#contrôle-daccès-rbac)
 9. [Fonctionnalités interactives](#fonctionnalités-interactives)
-10. [Temps réel — Server-Sent Events](#temps-réel--server-sent-events)
-11. [Comptes de test](#comptes-de-test)
-12. [Scénarios d'attaque](#scénarios-dattaque)
-13. [Analyse des logs](#analyse-des-logs)
-14. [Guide de simulation complète](#guide-de-simulation-complète)
-15. [Rapport & Screenshots](#rapport--screenshots)
-16. [Structure du projet](#structure-du-projet)
-17. [Dépannage](#dépannage)
+10. [Carte des Attaques Géographiques](#carte-des-attaques-géographiques)
+11. [Temps réel — Server-Sent Events](#temps-réel--server-sent-events)
+12. [Comptes de test](#comptes-de-test)
+13. [Scénarios d'attaque](#scénarios-dattaque)
+14. [Analyse des logs](#analyse-des-logs)
+15. [Guide de simulation complète](#guide-de-simulation-complète)
+16. [Rapport & Screenshots](#rapport--screenshots)
+17. [Structure du projet](#structure-du-projet)
+18. [Dépannage](#dépannage)
 
 ---
 
@@ -153,7 +154,7 @@ docker-compose down -v
 | SecureWatch Dashboard | http://localhost:3000 | — |
 | Alertmanager | http://localhost:9093 | — |
 | Prometheus | http://localhost:9090 | — |
-| Grafana | http://localhost:3001 | `admin` / `pfa2026` |
+| Grafana | http://localhost:3001 | `admin` / `changeme` |
 | Kibana | http://localhost:5601 | — |
 | Elasticsearch | http://localhost:9200 | — |
 
@@ -296,7 +297,7 @@ Toutes les alertes Prometheus sont désormais transmises à l'api-service via un
 Prometheus (règle FIRING)
   → Alertmanager
     → POST http://api-service:5002/api/alerts/webhook
-      → stockage en mémoire (max 100 alertes)
+      → stockage Redis (max 100 alertes, persistant entre redémarrages)
         → GET /api/alerts/pushed (admin + operator uniquement)
 ```
 
@@ -326,6 +327,9 @@ receivers:
 | `HighAuthFailureRate` | > 3 échecs auth/min pendant 2 min | warning | 2 min |
 | `RateLimitViolations` | > 5 requêtes 429 en 5 min | warning | immédiat |
 | `ForbiddenAccessSpike` | > 5 accès 403/min pendant 2 min | warning | 2 min |
+| `SQLiDetected` | `increase(sqli_attempts_total[5m]) > 0` | critical | immédiat |
+| `ScannerDetected` | `increase(scanner_ua_total[5m]) > 0` | warning | immédiat |
+| `GeoAnomalyDetected` | `increase(geo_anomaly_total[5m]) > 0` | warning | immédiat |
 
 **Groupe Infrastructure** — évalué toutes les 30 s :
 
@@ -376,6 +380,10 @@ Chaque carte d'alerte dans la section "Alertes de Sécurité" dispose d'un bouto
 - Un bouton **Réinitialiser** apparaît dans l'en-tête de la section dès qu'au moins une alerte est ignorée
 - Les alertes ignorées réapparaissent si la même IP lance une nouvelle attaque avec un fingerprint différent
 
+### Carte des Attaques Géographiques
+
+Voir la section [Carte des Attaques Géographiques](#carte-des-attaques-géographiques) ci-dessous.
+
 ### Rétention automatique des logs (ILM Elasticsearch)
 
 Un conteneur init `es-setup` (`curlimages/curl`) s'exécute une fois au démarrage, après qu'Elasticsearch est `healthy`, et applique :
@@ -394,6 +402,45 @@ Invoke-WebRequest "http://localhost:9200/security-logs-*/_ilm/explain" -UseBasic
 
 ---
 
+## Carte des Attaques Géographiques
+
+L'onglet **Carte des Attaques Géographiques** (accessible aux rôles `admin` et `operator`) affiche une carte du monde interactive projetant les origines géographiques des connexions suspectes détectées dans les logs.
+
+### Rendu
+
+- **Projection Natural Earth** (D3.js v7) avec graticule et fond de sphère
+- Les pays identifiés comme sources d'anomalies géographiques sont mis en évidence selon leur niveau de risque :
+  - `critical` — Corée du Nord, nœuds Tor
+  - `high` — Russie, Chine, Iran
+  - `medium` — Nigeria
+- Des **points d'attaque pulsants** sont placés aux coordonnées de chaque IP suspecte avec une infobulle affichant le pays, le code de risque et le nombre d'événements.
+
+### Pays surveillés
+
+| Code | Pays | Niveau |
+|---|---|:---:|
+| KP | Corée du Nord | critical |
+| TOR | Nœud Tor Exit | critical |
+| RU | Russie | high |
+| CN | Chine | high |
+| IR | Iran | high |
+| NG | Nigeria | medium |
+
+### Données
+
+La carte se base sur les logs `event_type: geo_anomaly` présents dans Elasticsearch pour la plage temporelle sélectionnée. Elle se met à jour à chaque rafraîchissement global (8 s) si la section est active.
+
+Le fichier de topologie `world-110m.json` (Natural Earth 110 m, TopoJSON v3) est servi par le conteneur `frontend`.
+
+### Bibliothèques utilisées (chargées via CDN dans `index.html`)
+
+| Bibliothèque | Version | Rôle |
+|---|---|---|
+| D3.js | v7 | Projection géographique, SVG, graticule |
+| TopoJSON | v3 | Décodage du fichier `world-110m.json` |
+
+---
+
 ## Temps réel — Server-Sent Events
 
 Le dashboard bascule de la scrutation toutes les 8 secondes à un flux SSE pour les événements de sécurité critiques.
@@ -402,8 +449,10 @@ Le dashboard bascule de la scrutation toutes les 8 secondes à un flux SSE pour 
 
 ```
 auth-service (Flask)
-  │  push_sse({'type': 'brute_force', 'ip': ..., 'count': ...})
-  │  push_sse({'type': 'auth_failure', ...})
+  │  push_sse({'type': 'brute_force',   'ip': ..., 'count': ...})
+  │  push_sse({'type': 'auth_failure',  ...})
+  │  push_sse({'type': 'sqli_attempt',  'ip': ..., 'payload': ...})
+  │  push_sse({'type': 'suspicious_ua', 'ip': ..., 'user_agent': ...})
   ▼
 /events/stream  (text/event-stream, X-Accel-Buffering: no)
   │
@@ -412,8 +461,10 @@ auth-service (Flask)
   ▼
 EventSource('/auth/stream?token=<jwt>')  ← navigateur
   │
-  ├─ auth_failure  → refresh() immédiat (mise à jour compteurs + logs)
-  └─ brute_force   → refresh() + toast violet "Brute force détecté — IP x.x.x.x"
+  ├─ auth_failure   → refresh() immédiat (mise à jour compteurs + logs)
+  ├─ brute_force    → refresh() + toast "Brute force — IP x.x.x.x (N tentatives)"
+  ├─ sqli_attempt   → refresh() + toast "Injection SQL — IP x.x.x.x : <payload>"
+  └─ suspicious_ua  → refresh() + toast "Scanner détecté — IP x.x.x.x : <ua>"
 ```
 
 ### Comportement
@@ -472,6 +523,7 @@ SecureWatch implémente un contrôle d'accès basé sur les rôles (RBAC) à deu
 | Tableau de bord | ✓ | ✓ | ✓ |
 | Flux de Logs | ✓ | ✓ | ✓ |
 | Alertes de Sécurité | ✓ | ✓ | ✗ |
+| Carte des Attaques Géographiques | ✓ | ✓ | ✗ |
 | État des Services | ✓ | ✓ | ✗ |
 | Monitoring Prometheus | ✓ | ✗ | ✗ |
 | `/api/alerts/pushed` | ✓ | ✓ | ✗ |
@@ -558,7 +610,25 @@ python scripts/generate_attacks.py --scenario suspicious-upload
 # Déclenche : logs rate_limited dans ELK, alerte RateLimitViolations dans Prometheus
 python scripts/generate_attacks.py --scenario rate-limit
 
-# Tous les scénarios enchaînés
+# Scénario 7 — Injection SQL
+# 6 payloads SQLi envoyés comme username à /auth/login (OR bypass, UNION, SLEEP, DROP…)
+# auth-service détecte les patterns via regex et retourne HTTP 400
+# Déclenche : logs sqli_attempt niveau WARNING, SSE push, Logstash tag SQL_INJECTION
+python scripts/generate_attacks.py --scenario sql-injection
+
+# Scénario 8 — User-agents scanners
+# 8 requêtes avec UA connus (sqlmap, Nikto, Nessus, masscan, Nuclei, gobuster…)
+# Les services détectent l'UA avant traitement (before_request) et logguent l'incident
+# Déclenche : logs suspicious_ua niveau WARNING, Logstash tag SCANNER_DETECTED
+python scripts/generate_attacks.py --scenario scanner-ua
+
+# Scénario 9 — Anomalie géographique
+# 7 requêtes avec X-Forwarded-For simulant des IPs suspectes (RU, CN, KP, IR, TOR, NG)
+# api-service détecte les préfixes IP géographiques et logge l'anomalie
+# Déclenche : logs geo_anomaly niveau WARNING, Logstash tag GEO_ANOMALY
+python scripts/generate_attacks.py --scenario geo-anomaly
+
+# Tous les scénarios enchaînés (9 au total)
 python scripts/generate_attacks.py --scenario all
 ```
 
@@ -703,10 +773,23 @@ Points à expliquer :
 - Graphique requêtes HTTP/s par service
 
 **Onglet Sécurité :**
-- Stat cards : brute force total, 403 total, **429 total** (source: Elasticsearch), 500 total
-- Graphique auth failures/min — source Prometheus (`auth_failures_total`)
-- Graphique 429/min — source **Elasticsearch** (gateway logs, Flask ne voit jamais les 429)
-- Graphique combiné sécurité : 403 + auth failures sur 30 min
+
+Rangée 1 — Compteurs de détection d'attaques (source Prometheus) :
+- **Brute Force Détecté** (`brute_force_total`)
+- **Injections SQL** (`sqli_attempts_total`)
+- **Scanners Offensifs** (`scanner_ua_total`, agrégé auth-service + api-service)
+- **Anomalies Géo** (`geo_anomaly_total`)
+
+Rangée 2 — Métriques HTTP (sources mixtes) :
+- **Accès Interdits 403** — source Prometheus (`flask_http_request_total{status="403"}`)
+- **Rate Limit 429** — source **Elasticsearch** (gateway logs, Flask ne voit jamais les 429)
+- **Erreurs Système 500** — source Prometheus
+
+Graphiques :
+- **Échecs Auth / min** — courbe des tentatives échouées sur 30 min (`auth_failures_total`)
+- **Rate Limit (429) / min** — courbe des requêtes bloquées depuis Elasticsearch
+- **Menaces Avancées — Tendances** — 3 courbes simultanées : SQLi (rouge), Scanner UA (violet), Anomalie Géo (cyan) sur 30 min
+- **Incidents de Sécurité — Tendances** — 403 Forbidden + Auth Failures sur 30 min
 
 Expliquer l'architecture hybride : la plupart des métriques viennent de Prometheus, mais les 429 viennent d'Elasticsearch car nginx bloque les requêtes avant qu'elles atteignent Flask.
 
@@ -714,7 +797,7 @@ Expliquer l'architecture hybride : la plupart des métriques viennent de Prometh
 
 ### Étape 7 — Grafana (http://localhost:3001)
 
-Identifiants : `admin` / `pfa2026`
+Identifiants : `admin` / `changeme`
 
 **Dashboard "Infrastructure — SecureWatch" :**
 - CPU Usage % — `(1 - avg(rate(node_cpu_seconds_total{mode="idle"}[1m]))) * 100`
@@ -761,12 +844,23 @@ Prometheus évalue les règles toutes les 30s
 
 ### Étape 9 — Kibana (http://localhost:5601)
 
-Analytics → Discover → index `security-logs-*`
+**Première utilisation — configurer le dashboard automatiquement :**
+
+```powershell
+python scripts/setup_kibana.py
+# Crée : index pattern security-logs-*, 3 visualisations, 1 dashboard
+# URL dashboard : http://localhost:5601/app/dashboards
+```
+
+Analytics → Discover → index `security-logs-*` est maintenant configuré par défaut.
 
 Requêtes utiles à montrer :
 ```
 event_type: brute_force          → toutes les attaques brute force
 event_type: forbidden_access     → tous les accès interdits
+event_type: sqli_attempt         → tentatives d'injection SQL détectées
+event_type: suspicious_ua        → scanners et outils offensifs détectés
+event_type: geo_anomaly          → connexions depuis pays suspects
 status: 429                      → toutes les requêtes rate limitées
 level: CRITICAL                  → événements critiques
 service: api-gateway             → logs de la gateway uniquement
@@ -776,6 +870,8 @@ tags: security_event             → tous les événements de sécurité
 Ajouter des colonnes : `ip`, `service`, `level`, `event_type`, `alert_type`.
 
 Montrer un document complet et expliquer les champs ajoutés par Logstash : `alert_type`, `tags`, `source`.
+
+Le dashboard pré-configuré regroupe : compteur total d'événements, répartition par `alert_type` (barres), timeline des événements par type (aires empilées, dernières 24 h).
 
 ---
 
@@ -803,7 +899,16 @@ python scripts/generate_attacks.py --scenario server-errors
 # Uploads de fichiers suspects
 python scripts/generate_attacks.py --scenario suspicious-upload
 
-# Tout enchaîné (brute force + forbidden + normal + server-errors + uploads + rate-limit)
+# Injection SQL (payloads dans /auth/login)
+python scripts/generate_attacks.py --scenario sql-injection
+
+# Scanners offensifs (sqlmap, Nikto, masscan…)
+python scripts/generate_attacks.py --scenario scanner-ua
+
+# Anomalies géographiques (RU, CN, KP, IR, TOR…)
+python scripts/generate_attacks.py --scenario geo-anomaly
+
+# Tout enchaîné (9 scénarios)
 python scripts/generate_attacks.py --scenario all
 ```
 
@@ -858,6 +963,7 @@ Tous les scripts nécessitent `pip install playwright && playwright install chro
 | `scripts/screenshot_themes.py` | Comparaison thème clair / sombre |
 | `scripts/screenshot_responsive.py` | Rendu mobile, tablette, desktop |
 | `scripts/take_alerts_screenshots.py` | États des alertes Prometheus / Alertmanager |
+| `scripts/setup_kibana.py` | Provisionne Kibana : index pattern, 3 visualisations, dashboard |
 | `scripts/take_kibana_screenshot.py` | Vue Kibana Discover avec index `security-logs-*` |
 | `scripts/functional_audit.py` | Audit fonctionnel automatisé — rapport PASS/FAIL |
 
@@ -890,7 +996,7 @@ pfa 2025-2026/
 │
 ├── monitoring/
 │   ├── prometheus.yml              # Scrape configs (5 targets) + rule_files + alerting
-│   ├── alert_rules.yml             # 8 règles d'alertes (4 sécurité + 4 infrastructure)
+│   ├── alert_rules.yml             # 11 règles d'alertes (7 sécurité + 4 infrastructure)
 │   ├── alertmanager.yml            # Webhook actif → api-service:5002/api/alerts/webhook
 │   └── grafana/
 │       ├── provisioning/
@@ -904,25 +1010,32 @@ pfa 2025-2026/
 │   ├── auth-service/
 │   │   ├── app.py                  # Flask : /login /logout /register /validate /health /metrics
 │   │   │                           # JWT HS256, brute force detection, sanitize_input()
+│   │   │                           # Détection SQLi (SQLI_PATTERNS regex) + scanner UA (before_request)
 │   │   │                           # Redis : incr_failure / reset_failure (fallback mémoire)
-│   │   │                           # SSE  : /events/stream — push push_sse() sur auth_failure/brute_force
-│   │   │                           # Counters Prometheus : auth_failures_total, brute_force_total
+│   │   │                           # SSE  : /events/stream — push push_sse() sur auth_failure/brute_force/sqli_attempt/suspicious_ua
+│   │   │                           # Counters Prometheus : auth_failures_total, brute_force_total, sqli_attempts_total, scanner_ua_total
 │   │   ├── Dockerfile
 │   │   └── requirements.txt        # + redis>=5.0.0
 │   ├── api-service/
 │   │   ├── app.py                  # Flask : /api/* /health /metrics
 │   │   │                           # Validation JWT réelle (PyJWT), RBAC server-side
-│   │   │                           # /api/alerts/webhook (Alertmanager) + /api/alerts/pushed
-│   │   │                           # Counters : forbidden_access_total, server_errors_total
+│   │   │                           # Détection scanner UA + anomalie géo X-Forwarded-For (before_request)
+│   │   │                           # /api/alerts/webhook (Alertmanager, stockage Redis) + /api/alerts/pushed
+│   │   │                           # Counters : forbidden_access_total, server_errors_total, scanner_ua_total, geo_anomaly_total
 │   │   ├── Dockerfile
 │   │   └── requirements.txt
 │   └── frontend/
-│       ├── index.html              # SPA : login, nav RBAC, time-range select, btn-export-csv
-│       ├── style.css               # Thème dark/light, nav-restricted, access-toast, dismiss btn
+│       ├── index.html              # SPA : login, nav RBAC, time-range select, btn-export-csv, section geomap
+│       ├── style.css               # Thème dark/light, nav-restricted, access-toast, dismiss btn, geo-map styles
 │       ├── app.js                  # RBAC (SECTION_ROLES, applyRoleRestrictions)
-│       │                           # SSE  : initSSE / closeSSE / showSecurityToast
+│       │                           # SSE  : initSSE / closeSSE / showSecurityToast (brute_force, sqli_attempt, suspicious_ua)
 │       │                           # UX   : sélecteur plage, exportCSV, acquittement alertes
 │       │                           # ES queries, Prometheus panels, alertes, services status
+│       │                           # Geo Map : initGeoMap / refreshGeoMap (D3.js + TopoJSON)
+│       │                           # Monitoring Sécurité : 7 stat cards + 4 graphiques
+│       │                           #   refreshSecurity() — sqli_attempts_total, scanner_ua_total, geo_anomaly_total
+│       │                           #   chart-threats : Menaces Avancées (SQLi + Scanner + Geo, 30 min)
+│       ├── world-110m.json         # Topologie mondiale Natural Earth 110m (TopoJSON v3)
 │       ├── nginx.conf              # Proxies allowlist : /es/, /prometheus/, health checks
 │       │                           # SSE  : /auth/stream (buffering off, timeout 3600s)
 │       │                           # En-têtes CSP, X-Frame-Options, X-Content-Type-Options
@@ -935,10 +1048,15 @@ pfa 2025-2026/
 ├── logstash/
 │   ├── logstash.yml
 │   └── pipeline/logstash.conf     # Parsing JSON, tagging sécurité, indexation ES
+│                                   # event_types : brute_force, auth_failure, forbidden_access,
+│                                   #   unauthorized_access, suspicious_upload, rate_limited,
+│                                   #   sqli_attempt, suspicious_ua, geo_anomaly, server_error
 ├── filebeat/filebeat.yml          # Collecte /logs/*.log → Logstash
 │
 ├── scripts/
-│   ├── generate_attacks.py        # 6 scénarios d'attaque (brute force, 403, rate-limit…)
+│   ├── generate_attacks.py        # 9 scénarios d'attaque (brute force, 403, rate-limit,
+│   │                              #   sql-injection, scanner-ua, geo-anomaly…)
+│   ├── setup_kibana.py            # Provisionne Kibana : index pattern + 3 visualisations + dashboard
 │   ├── analyse_logs.py            # Rapport CLI depuis Elasticsearch
 │   ├── functional_audit.py        # Audit fonctionnel automatisé Playwright (PASS/FAIL)
 │   ├── take_screenshots.py        # Captures principales du dashboard
@@ -987,11 +1105,13 @@ wsl -d docker-desktop sysctl -w vm.max_map_count=262144
 
 Elasticsearch n'est pas encore prêt. Attendre 60–90 s après `docker-compose up -d`.
 
-### La section Monitoring affiche `—` partout
+### La section Monitoring affiche `—` pour les graphiques
 
 Le dashboard Monitoring initialise les graphiques uniquement quand la section est visible (lazy init). Cliquer sur "Monitoring" dans la barre latérale, puis attendre ~15 secondes le premier chargement.
 
-Si le problème persiste, vérifier que Prometheus est accessible :
+> Les compteurs affichent `0` (et non `—`) lorsqu'aucun événement n'a encore été détecté — c'est le comportement attendu.
+
+Si les graphiques restent vides, vérifier que Prometheus est accessible :
 ```powershell
 Invoke-WebRequest http://localhost:9090/api/v1/query?query=up -UseBasicParsing
 ```
@@ -1037,7 +1157,7 @@ Invoke-WebRequest "http://localhost:9200/security-logs-*/_search?size=5&sort=@ti
 |---|---|---|
 | **Nginx** | Alpine | API Gateway HTTPS — TLS, rate limiting, logs JSON, proxy |
 | **OpenSSL** | 3.x | Certificat TLS auto-signé (RSA 2048) |
-| **Prometheus** | Latest | Métriques temps réel — scrape 15 s, 8 règles d'alertes |
+| **Prometheus** | Latest | Métriques temps réel — scrape 15 s, 11 règles d'alertes |
 | **Alertmanager** | Latest | Routage, groupement et affichage des alertes |
 | **Grafana** | Latest | 2 dashboards auto-provisionnés (infrastructure + sécurité) |
 | **Node Exporter** | Latest | Métriques CPU/RAM/disque de l'hôte |
@@ -1049,6 +1169,8 @@ Invoke-WebRequest "http://localhost:9200/security-logs-*/_search?size=5&sort=@ti
 | **Python / Flask** | 3.11 / 3.0 | Microservices + métriques Prometheus + SSE stream |
 | **Redis** | 7 Alpine | Compteurs brute force persistants — INCR/EXPIRE/DEL |
 | **Chart.js** | 4.4.0 | Graphiques temps réel dans SecureWatch |
+| **D3.js** | v7 | Carte des attaques géographiques — projection Natural Earth |
+| **TopoJSON** | v3 | Décodage de la topologie mondiale `world-110m.json` |
 | Docker Compose | Latest | Orchestration — 16 conteneurs, 3 réseaux |
 
 ---

@@ -4,13 +4,16 @@ PFA 2025-2026 : Centralisation des Logs pour la Détection d'Incidents de Sécur
 """
 
 import os
+import re
 import json
 import random
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_client import Counter
 import jwt
+import redis as redis_lib
 
 app = Flask(__name__)
 
@@ -24,16 +27,71 @@ forbidden_access_total = Counter(
 server_errors_total = Counter(
     'server_errors_total', 'Total 500 Internal Server Errors', ['endpoint']
 )
+scanner_ua_total = Counter(
+    'scanner_ua_total', 'Total scanner/offensive tool detections'
+)
+geo_anomaly_total = Counter(
+    'geo_anomaly_total', 'Total geographic anomaly detections'
+)
 
 SERVICE_NAME = os.environ.get('SERVICE_NAME', 'api-service')
 LOG_FILE = '/app/logs/api-service.log'
+
+# ── Security detection patterns ───────────────────────────────
+SCANNER_UAS = re.compile(
+    r"(sqlmap|nikto|nessus|masscan|nmap\s|zgrab|openvas|dirbuster|"
+    r"nuclei|gobuster|ffuf|wfuzz|burpsuite|acunetix|w3af|arachni)",
+    re.IGNORECASE,
+)
+
+# IP prefixes mapped to (country_code, country_name)
+_GEO_SUSPICIOUS = {
+    "195.154.": ("RU", "Russia"),
+    "91.121.":  ("RU", "Russia"),
+    "103.235.": ("CN", "China"),
+    "175.45.176.": ("KP", "North Korea"),
+    "5.61.":    ("IR", "Iran"),
+    "185.220.": ("TOR", "Tor Exit Node"),
+    "162.247.": ("TOR", "Tor Exit Node"),
+    "41.223.":  ("NG", "Nigeria"),
+}
+
+
+def _geo_lookup(ip: str):
+    for prefix, info in _GEO_SUSPICIOUS.items():
+        if ip.startswith(prefix):
+            return info
+    return None, None
 
 # JWT — must match the secret used by auth-service
 JWT_SECRET = os.environ.get('JWT_SECRET', 'change-me-in-production-minimum-32chars!')
 JWT_ALGORITHM = 'HS256'
 
-# In-memory store for Alertmanager webhook notifications (max 100)
-_webhook_alerts = []
+# ── Redis (persistent webhook alert store) ───────────────────
+_redis = None
+_redis_lock = threading.Lock()
+WEBHOOK_KEY = 'webhook_alerts'
+WEBHOOK_MAX = 100
+
+def get_redis():
+    global _redis
+    if _redis is not None:
+        return _redis
+    with _redis_lock:
+        if _redis is None:
+            try:
+                r = redis_lib.Redis(
+                    host=os.environ.get('REDIS_HOST', 'redis'),
+                    port=int(os.environ.get('REDIS_PORT', 6379)),
+                    decode_responses=True,
+                    socket_connect_timeout=1,
+                    socket_timeout=1,
+                )
+                r.ping()
+                _redis = r
+            except Exception:
+                pass
+    return _redis
 
 USERS_DATA = [
     {'id': 1, 'name': 'Alice Martin',  'role': 'admin',    'email': 'alice@pfa.local'},
@@ -112,6 +170,38 @@ def get_client_ip() -> str:
     through the gateway, unlike X-Forwarded-For.
     """
     return request.headers.get('X-Real-IP', request.remote_addr)
+
+
+# ─── Security middleware ────────────────────────────────────────────────────────
+
+@app.before_request
+def detect_threats():
+    ip = get_client_ip()
+    ua = request.headers.get('User-Agent', '')
+
+    # Scanner / offensive tool detection
+    if ua and SCANNER_UAS.search(ua):
+        safe_ua = re.sub(r'[\x00-\x1f\x7f]', '', ua)[:200]
+        log_event('WARNING', f'Scanner/offensive tool detected from {ip}: {safe_ua[:80]}', {
+            'ip': ip, 'endpoint': request.path, 'method': request.method,
+            'event_type': 'suspicious_ua', 'user_agent': safe_ua,
+        })
+        scanner_ua_total.inc()
+
+    # Geographic anomaly — check first hop of X-Forwarded-For
+    xff = request.headers.get('X-Forwarded-For', '')
+    if xff:
+        first_ip = xff.split(',')[0].strip()
+        country_code, country_name = _geo_lookup(first_ip)
+        if country_code:
+            log_event('WARNING',
+                      f'Geographic anomaly: request from {country_name} ({country_code}) via {first_ip}', {
+                          'ip': ip, 'claimed_ip': first_ip,
+                          'country_code': country_code, 'country_name': country_name,
+                          'endpoint': request.path, 'method': request.method,
+                          'event_type': 'geo_anomaly',
+                      })
+            geo_anomaly_total.inc()
 
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
@@ -265,8 +355,9 @@ def alerts_webhook():
     ip = get_client_ip()
     incoming = data.get('alerts', [])
 
+    r = get_redis()
     for alert in incoming:
-        _webhook_alerts.insert(0, {
+        entry = json.dumps({
             'status':   alert.get('status', 'unknown'),
             'name':     alert.get('labels', {}).get('alertname', ''),
             'severity': alert.get('labels', {}).get('severity', 'info'),
@@ -274,7 +365,12 @@ def alerts_webhook():
             'summary':  alert.get('annotations', {}).get('summary', ''),
             'starts_at': alert.get('startsAt', ''),
         })
-    _webhook_alerts[:] = _webhook_alerts[:100]
+        if r:
+            try:
+                r.lpush(WEBHOOK_KEY, entry)
+                r.ltrim(WEBHOOK_KEY, 0, WEBHOOK_MAX - 1)
+            except Exception:
+                pass
 
     log_event('INFO', f'Alertmanager webhook: {len(incoming)} alert(s) received', {
         'ip': ip, 'endpoint': '/api/alerts/webhook',
@@ -285,7 +381,7 @@ def alerts_webhook():
 
 @app.route('/api/alerts/pushed', methods=['GET'])
 def get_pushed_alerts():
-    """Admin + Operator only — returns Alertmanager webhook alerts."""
+    """Admin + Operator only — returns Alertmanager webhook alerts (Redis-backed)."""
     ip = get_client_ip()
     ok, code = require_roles(request, ['admin', 'operator'])
     if not ok:
@@ -296,7 +392,15 @@ def get_pushed_alerts():
         })
         msg = 'Unauthorized' if code == 401 else 'Forbidden — Operator or Admin role required'
         return jsonify({'error': msg}), code
-    return jsonify({'alerts': _webhook_alerts}), 200
+
+    r = get_redis()
+    alerts = []
+    if r:
+        try:
+            alerts = [json.loads(s) for s in r.lrange(WEBHOOK_KEY, 0, WEBHOOK_MAX - 1)]
+        except Exception:
+            pass
+    return jsonify({'alerts': alerts}), 200
 
 
 @app.errorhandler(404)

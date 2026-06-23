@@ -47,6 +47,36 @@ groups:
           summary: "Pic d'accès interdits (403)"
           description: "Plus de 5 accès interdits/min depuis 2 minutes."
 
+      - alert: SQLiDetected
+        expr: increase(sqli_attempts_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "Tentative d'injection SQL détectée"
+          description: "Le compteur sqli_attempts_total a augmenté dans les 5 dernières minutes."
+
+      - alert: ScannerDetected
+        expr: increase(scanner_ua_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Outil de scan offensif détecté"
+          description: "Le compteur scanner_ua_total a augmenté dans les 5 dernières minutes."
+
+      - alert: GeoAnomalyDetected
+        expr: increase(geo_anomaly_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Anomalie géographique détectée"
+          description: "Le compteur geo_anomaly_total a augmenté dans les 5 dernières minutes."
+
   # ─────────────────────────────────────────
   # INFRASTRUCTURE — Santé des services
   # ─────────────────────────────────────────

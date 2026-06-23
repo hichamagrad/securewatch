@@ -118,13 +118,86 @@ def rate_limit_test(delay=0.05, **kw):
 
     print("  -> " + str(hits_429) + " requetes bloquees (429) sur 70 envoyees")
 
+SQL_PAYLOADS = [
+    ("' OR '1'='1",           "classic_or"),
+    ("admin'--",              "comment_bypass"),
+    ("1; DROP TABLE users--", "drop_table"),
+    ("' UNION SELECT 1,2,3--","union_select"),
+    ("' OR SLEEP(5)--",       "time_based"),
+    ("1' AND '1'='1",         "blind_injection"),
+]
+
+def sql_injection(delay=0.2, **kw):
+    ip = random.choice(ATTACKER)
+    print("[SCENARIO 7] SQL Injection depuis " + ip + " - " + str(len(SQL_PAYLOADS)) + " payloads")
+    for i, (payload, label) in enumerate(SQL_PAYLOADS):
+        s = req("post", AUTH_URL + "/login",
+                json={"username": payload, "password": "x"},
+                headers={"X-Forwarded-For": ip})
+        print("  [" + str(i+1) + "] " + label + ": '" + payload[:35] + "' -> HTTP " + str(s))
+        time.sleep(delay)
+    print("  -> " + str(len(SQL_PAYLOADS)) + " tentatives SQLi envoyees")
+
+
+SCANNER_AGENTS = [
+    "sqlmap/1.7.8#stable (https://sqlmap.org)",
+    "Nikto/2.1.6",
+    "Mozilla/5.0 (compatible; Nessus; http://www.nessus.org/)",
+    "masscan/1.3 (https://github.com/robertdavidgraham/masscan)",
+    "Mozilla/5.0 zgrab/0.x",
+    "Nuclei - Open-source project (github.com/projectdiscovery/nuclei)",
+    "DirBuster-1.0-RC1",
+    "gobuster/3.6",
+]
+
+def suspicious_user_agent(delay=0.2, **kw):
+    ip = random.choice(ATTACKER)
+    print("[SCENARIO 8] Scanners suspects depuis " + ip)
+    scan_routes = [
+        API_URL + "/users", API_URL + "/admin", API_URL + "/data",
+        AUTH_URL + "/health", API_URL + "/config", API_URL + "/reports",
+        API_URL + "/users", API_URL + "/admin",
+    ]
+    for i, ua in enumerate(SCANNER_AGENTS):
+        endpoint = scan_routes[i % len(scan_routes)]
+        s = req("get", endpoint, headers={"X-Forwarded-For": ip, "User-Agent": ua})
+        print("  [" + str(i+1) + "] " + ua[:50] + " -> HTTP " + str(s))
+        time.sleep(delay)
+    print("  -> " + str(len(SCANNER_AGENTS)) + " requetes avec UA suspects")
+
+
+GEO_ANOMALY_IPS = [
+    ("195.154.167.211", "RU",  "Russia"),
+    ("103.235.46.116",  "CN",  "China"),
+    ("175.45.176.3",    "KP",  "North Korea"),
+    ("5.61.27.157",     "IR",  "Iran"),
+    ("185.220.101.5",   "TOR", "Tor Exit Node"),
+    ("41.223.27.133",   "NG",  "Nigeria"),
+    ("91.121.45.22",    "RU",  "Russia"),
+]
+
+def geo_anomaly(delay=0.3, **kw):
+    print("[SCENARIO 9] Anomalies geographiques - " + str(len(GEO_ANOMALY_IPS)) + " IPs")
+    geo_routes = [API_URL + "/users", API_URL + "/admin", API_URL + "/data",
+                  AUTH_URL + "/health", API_URL + "/reports"]
+    for i, (ip, code, country) in enumerate(GEO_ANOMALY_IPS):
+        endpoint = geo_routes[i % len(geo_routes)]
+        s = req("get", endpoint, headers={"X-Forwarded-For": ip})
+        print("  [" + code + "] " + ip + " (" + country + ") -> HTTP " + str(s))
+        time.sleep(delay)
+    print("  -> " + str(len(GEO_ANOMALY_IPS)) + " IPs suspectes testees")
+
+
 SCENARIOS = {
-    "brute-force":     brute_force,
-    "forbidden-scan":  forbidden_scan,
-    "normal":          normal_traffic,
-    "server-errors":   server_errors,
+    "brute-force":       brute_force,
+    "forbidden-scan":    forbidden_scan,
+    "normal":            normal_traffic,
+    "server-errors":     server_errors,
     "suspicious-upload": suspicious_uploads,
-    "rate-limit":      rate_limit_test,
+    "rate-limit":        rate_limit_test,
+    "sql-injection":     sql_injection,
+    "scanner-ua":        suspicious_user_agent,
+    "geo-anomaly":       geo_anomaly,
 }
 
 def main():
@@ -144,7 +217,7 @@ def main():
     print("     Gateway    : https://localhost:8443  (HTTP :8080 redirige)")
     print("     Dashboard  : http://localhost:3000")
     print("     Kibana     : http://localhost:5601")
-    print("     Grafana    : http://localhost:3001  (admin / pfa2026)")
+    print("     Grafana    : http://localhost:3001  (admin / changeme)")
     print("     Prometheus : http://localhost:9090")
     print("     Analyse    : python scripts/analyse_logs.py")
 
